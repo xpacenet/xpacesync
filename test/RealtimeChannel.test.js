@@ -19,6 +19,11 @@ class FakeMesh extends EventTarget {
   broadcast (payload) {
     this.peer?.dispatchEvent(new CustomEvent('message', { detail: { from: this.selfId, payload } }))
   }
+  send (peerId, payload) {
+    if (peerId === this.peer?.selfId) {
+      this.peer.dispatchEvent(new CustomEvent('message', { detail: { from: this.selfId, payload } }))
+    }
+  }
 }
 
 function wireTwoPeers (roomId) {
@@ -77,6 +82,21 @@ describe('RealtimeChannel', () => {
     aliceCh.send('move', { x: 1, y: 2 })
 
     expect(await aliceCh.history('move')).toEqual([])
+  })
+
+  it('sendTo() reaches only the addressed peer, for point-to-point protocols like a state handshake', () => {
+    const { alice, bob } = wireTwoPeers('room-v')
+    const registry = new MessageRegistry()
+    const aliceCh  = new RealtimeChannel(alice, { registry, log: new MessageLog() })
+    const bobCh    = new RealtimeChannel(bob,   { registry, log: new MessageLog() })
+
+    const bobReceived = []
+    bobCh.on('state_req', msg => bobReceived.push(msg))
+
+    aliceCh.sendTo('bob', 'state_req', {})
+
+    expect(bobReceived).toHaveLength(1)
+    expect(bobReceived[0].from).toBe('alice')
   })
 
   it('ignores the mesh-internal intro frame — it never reaches an app-level handler', () => {

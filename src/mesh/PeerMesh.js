@@ -23,10 +23,19 @@ const DEFAULT_ICE_SERVERS = [
  * point: new message types never require touching this file.
  *
  * Events (EventTarget CustomEvents):
- *   peer:join    detail: { peerId }
+ *   peer:join    detail: { peerId, announced }  — signaling learned of this peer
+ *                                                  (announced = whatever extra
+ *                                                  fields the caller's introPayload
+ *                                                  puts on the wire, e.g. a display
+ *                                                  name — PeerMesh doesn't interpret it)
+ *   peer:open    detail: { peerId }             — the data channel to this peer is
+ *                                                  actually open and ready to send/receive
+ *   peer:intro   detail: { peerId, announced }  — the peer's own intro frame arrived
+ *                                                  over the data channel (same shape as
+ *                                                  peer:join's announced, confirmed
+ *                                                  peer-to-peer rather than via signaling)
  *   peer:leave   detail: { peerId }
- *   message      detail: { from, payload }
- *   status       detail: { peerCount }
+ *   message      detail: { from, payload }      — any non-protocol data-channel message
  */
 export class PeerMesh extends EventTarget {
   #pool            = null
@@ -37,6 +46,8 @@ export class PeerMesh extends EventTarget {
   #iceServers      = DEFAULT_ICE_SERVERS
   #heartbeatTimer  = null
   #onIntro         = null        // optional payload merged into every announce/intro frame
+  #localTracks     = []
+  #trackCb         = null
 
   /**
    * @param {object} opts
@@ -70,9 +81,13 @@ export class PeerMesh extends EventTarget {
     this.#pool.onOpen(() => this.#announce())
 
     this.#pool.on('peer_join', async msg => {
-      const { peerId } = msg
+      // `t` and `roomId` are the signaling envelope; anything else the
+      // bridge relayed (e.g. the introPayload fields the peer announced
+      // itself with) is forwarded as-is — PeerMesh doesn't know or care
+      // what those fields mean, only that they arrived alongside peerId.
+      const { peerId, t: _t, roomId: _roomId, ...announced } = msg
       if (peerId === this.#selfId) return
-      this.dispatchEvent(new CustomEvent('peer:join', { detail: { peerId } }))
+      this.dispatchEvent(new CustomEvent('peer:join', { detail: { peerId, announced } }))
       // A peer_join for someone we already track is normal on every
       // reconnect (both sides restate presence). Only rebuild the
       // connection if it's actually dead.
@@ -117,7 +132,6 @@ export class PeerMesh extends EventTarget {
 
   /** Attach a local media track to every current and future peer connection. */
   addTrack (track, stream) {
-    this.#localTracks ??= []
     this.#localTracks.push({ track, stream })
     for (const { peer } of this.#peers.values()) peer.addTrack(track, stream)
   }
@@ -136,6 +150,11 @@ export class PeerMesh extends EventTarget {
     })
 
     peer.onMessage(payload => {
+      if (payload?.__xpacesync === 'intro') {
+        const { __xpacesync: _tag, from: _from, ...announced } = payload
+        this.dispatchEvent(new CustomEvent('peer:intro', { detail: { peerId, announced } }))
+        return
+      }
       this.dispatchEvent(new CustomEvent('message', { detail: { from: peerId, payload } }))
     })
 
@@ -147,11 +166,12 @@ export class PeerMesh extends EventTarget {
       // from "still negotiating for the first time" (leave alone).
       entry.hasBeenOpen = true
       peer.send({ __xpacesync: 'intro', from: this.#selfId, ...this.#onIntro() })
+      this.dispatchEvent(new CustomEvent('peer:open', { detail: { peerId } }))
     })
 
     peer.addEventListener('failed', () => this.#teardownPeer(peerId))
 
-    for (const { track, stream } of this.#localTracks ?? []) peer.addTrack(track, stream)
+    for (const { track, stream } of this.#localTracks) peer.addTrack(track, stream)
 
     return peer
   }

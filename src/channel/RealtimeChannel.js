@@ -39,7 +39,6 @@ export class RealtimeChannel {
 
     this.#mesh.addEventListener('message', ({ detail }) => {
       const { from, payload } = detail
-      if (payload?.__xpacesync) return   // mesh-internal frame (intro), not app data
       this.#receive(from, payload)
     })
   }
@@ -53,6 +52,21 @@ export class RealtimeChannel {
     const message  = { type, payload, meta: { from: this.#mesh.selfId, ts: Date.now() } }
 
     this.#mesh.broadcast(message)
+    if (strategy.persist) this.#log.append(this.#roomId, type, message)
+    return message
+  }
+
+  /**
+   * Send `payload` as a message of `type` to exactly one peer — for
+   * protocols that are inherently point-to-point (a state request/response
+   * handshake, for instance) rather than something every peer needs.
+   * Persistence follows the same registry strategy as send().
+   */
+  sendTo (peerId, type, payload) {
+    const strategy = this.#registry.get(type)
+    const message  = { type, payload, meta: { from: this.#mesh.selfId, ts: Date.now() } }
+
+    this.#mesh.send(peerId, message)
     if (strategy.persist) this.#log.append(this.#roomId, type, message)
     return message
   }
