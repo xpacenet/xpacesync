@@ -1,0 +1,21 @@
+{
+  "name": "@xpacenet/xpacesync",
+  "version": "0.1.0",
+  "description": "Generalized realtime mesh for xpacenet apps — one transport, every message type, with a durable local log and a content cache, built on xpacenode.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "vitest": "^2.0.0"
+  },
+  "license": "UNLICENSED"
+}
