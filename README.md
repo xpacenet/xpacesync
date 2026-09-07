@@ -40,6 +40,15 @@ shows up.
   removed. It emits raw `{ from, payload }` messages and knows nothing
   about what a message means.
 
+  It also picks up STUN/TURN servers automatically from whichever
+  xpacenode it connects to (sent in the node's own `welcome` message) — no
+  app needs to pass its own `iceServers` anymore. Pass an explicit
+  `iceServers` array to the constructor if you need to override that (e.g.
+  a fixed test environment); an explicit value always wins and a node's own
+  offer never replaces it. With no override and no node-provided servers
+  (a node with no coturn configured), PeerMesh falls back to STUN-only
+  public defaults — no TURN relay, so it won't help peers that need one.
+
 - **`MessageRegistry`** — the abstraction from `REALTIME_LAYER.md` made
   literal: `registry.register('chat', { persist: true })`. A new message
   type is one call, not a new case in a library file.
