@@ -20,9 +20,17 @@
  *                          'contentStore' — payload is a CID reference;
  *                          the actual bytes live in contentStore and get
  *                          resolved through ContentCache, not sent inline.
+ *     queueOnFail: boolean REALTIME_LAYER.md's Milestone 2 resilience
+ *                          requirement: if this type's send() reaches zero
+ *                          live peers, queue it (OutboundQueue) instead of
+ *                          dropping it, and deliver it to the next peer who
+ *                          joins. Default false — only meaningful for types
+ *                          where a delayed delivery still means something
+ *                          (chat); a stale position update queued for
+ *                          hours would just be wrong once delivered.
  *   }
  */
-const DEFAULT_STRATEGY = Object.freeze({ persist: false, transport: 'mesh' })
+const DEFAULT_STRATEGY = Object.freeze({ persist: false, transport: 'mesh', queueOnFail: false })
 
 export class MessageRegistry {
   #types = new Map()

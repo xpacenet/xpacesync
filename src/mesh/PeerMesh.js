@@ -120,9 +120,18 @@ export class PeerMesh extends EventTarget {
     this.#pool = null
   }
 
-  /** Send `payload` (any JSON-serializable object) to one peer. No-op if not connected. */
+  /**
+   * Send `payload` (any JSON-serializable object) to one peer.
+   * @returns {boolean} true if an open data channel actually carried it,
+   *   false if there's no live connection to `peerId` right now (unknown
+   *   peer, or a connection that exists but isn't open yet/anymore) — the
+   *   signal RealtimeChannel's store-carry-forward fallback acts on.
+   */
   send (peerId, payload) {
-    this.#peers.get(peerId)?.peer.send(payload)
+    const entry = this.#peers.get(peerId)
+    if (!entry?.peer.connected) return false
+    entry.peer.send(payload)
+    return true
   }
 
   /**

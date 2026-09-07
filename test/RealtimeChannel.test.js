@@ -2,19 +2,25 @@ import { describe, it, expect, vi } from 'vitest'
 import { RealtimeChannel } from '../src/channel/RealtimeChannel.js'
 import { MessageRegistry } from '../src/registry/MessageRegistry.js'
 import { MessageLog }      from '../src/persistence/MessageLog.js'
+import { OutboundQueue }   from '../src/queue/OutboundQueue.js'
 
 /**
  * A minimal stand-in for PeerMesh — just enough surface (EventTarget +
- * selfId/roomId + broadcast()) for RealtimeChannel to be tested without a
- * real WebRTC/xpacenode connection. Two of these, wired to fire each
- * other's 'message' event on broadcast(), simulate a two-peer room.
+ * selfId/roomId/peerIds + broadcast()/send()) for RealtimeChannel to be
+ * tested without a real WebRTC/xpacenode connection. Two of these, wired to
+ * fire each other's 'message' event on broadcast(), simulate a two-peer
+ * room already connected. `simulateJoin()` fires the 'peer:open' event
+ * RealtimeChannel listens for to deliver anything queued for the room —
+ * the real PeerMesh only fires this once a peer's data channel is actually
+ * usable, not merely when signaling learns they exist ('peer:join').
  */
 class FakeMesh extends EventTarget {
   constructor (selfId, roomId) {
     super()
-    this.selfId = selfId
-    this.roomId = roomId
-    this.peer   = null   // the other FakeMesh, wired by the test
+    this.selfId  = selfId
+    this.roomId  = roomId
+    this.peer    = null   // the other FakeMesh, wired by the test
+    this.peerIds = []
   }
   broadcast (payload) {
     this.peer?.dispatchEvent(new CustomEvent('message', { detail: { from: this.selfId, payload } }))
@@ -22,7 +28,14 @@ class FakeMesh extends EventTarget {
   send (peerId, payload) {
     if (peerId === this.peer?.selfId) {
       this.peer.dispatchEvent(new CustomEvent('message', { detail: { from: this.selfId, payload } }))
+      return true
     }
+    return false
+  }
+  /** Test helper: simulate a peer actually joining — fires the same event PeerMesh does. */
+  simulateJoin (peerId) {
+    this.peerIds = [...this.peerIds, peerId]
+    this.dispatchEvent(new CustomEvent('peer:open', { detail: { peerId } }))
   }
 }
 
@@ -31,6 +44,8 @@ function wireTwoPeers (roomId) {
   const bob   = new FakeMesh('bob', roomId)
   alice.peer  = bob
   bob.peer    = alice
+  alice.peerIds = ['bob']
+  bob.peerIds   = ['alice']
   return { alice, bob }
 }
 
@@ -116,5 +131,78 @@ describe('RealtimeChannel', () => {
     }))
 
     expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('a queueOnFail type sent while isolated is queued and delivered once a peer joins', async () => {
+    const isolated = new FakeMesh('alice', 'room-queue-1')   // peer stays null — truly isolated
+    const registry = new MessageRegistry().register('chat', { queueOnFail: true })
+    const queue    = new OutboundQueue({ dbName: 'q-rc-1' })
+    const aliceCh  = new RealtimeChannel(isolated, { registry, log: new MessageLog(), queue })
+
+    aliceCh.send('chat', { text: 'anyone out there?' })
+
+    // Nothing to receive it yet — but it should be sitting in the queue.
+    expect(await queue.peek('room-queue-1')).toHaveLength(1)
+
+    // Now a peer actually joins. Wire it up as a receiver and simulate.
+    const bob = new FakeMesh('bob', 'room-queue-1')
+    isolated.peer = bob
+    const received = []
+    new RealtimeChannel(bob, { registry, log: new MessageLog(), queue: new OutboundQueue({ dbName: 'q-rc-1-bob' }) })
+      .on('chat', msg => received.push(msg))
+    isolated.simulateJoin('bob')
+
+    await vi.waitFor(() => expect(received).toHaveLength(1))
+    expect(received[0].payload).toEqual({ text: 'anyone out there?' })
+  })
+
+  it('a queueOnFail message reaches a second peer who joins later too, not just the first', async () => {
+    const isolated = new FakeMesh('alice', 'room-queue-2')
+    const registry = new MessageRegistry().register('chat', { queueOnFail: true })
+    const queue    = new OutboundQueue({ dbName: 'q-rc-2' })
+    const aliceCh  = new RealtimeChannel(isolated, { registry, log: new MessageLog(), queue })
+
+    aliceCh.send('chat', { text: 'broadcast to whoever shows up' })
+
+    const bob = new FakeMesh('bob', 'room-queue-2')
+    isolated.peer = bob
+    const bobReceived = []
+    new RealtimeChannel(bob, { registry, log: new MessageLog(), queue: new OutboundQueue({ dbName: 'q-rc-2-bob' }) })
+      .on('chat', msg => bobReceived.push(msg))
+    isolated.simulateJoin('bob')
+    await vi.waitFor(() => expect(bobReceived).toHaveLength(1))
+
+    // A second, different peer joins afterward — the backlog is still there for them too.
+    const carol = new FakeMesh('carol', 'room-queue-2')
+    isolated.peer = carol
+    const carolReceived = []
+    new RealtimeChannel(carol, { registry, log: new MessageLog(), queue: new OutboundQueue({ dbName: 'q-rc-2-carol' }) })
+      .on('chat', msg => carolReceived.push(msg))
+    isolated.simulateJoin('carol')
+
+    await vi.waitFor(() => expect(carolReceived).toHaveLength(1))
+    expect(carolReceived[0].payload).toEqual({ text: 'broadcast to whoever shows up' })
+  })
+
+  it('a type without queueOnFail is simply dropped when isolated, not queued', async () => {
+    const isolated = new FakeMesh('alice', 'room-queue-3')
+    const registry = new MessageRegistry().register('move', { queueOnFail: false })
+    const queue    = new OutboundQueue({ dbName: 'q-rc-3' })
+    const aliceCh  = new RealtimeChannel(isolated, { registry, log: new MessageLog(), queue })
+
+    aliceCh.send('move', { x: 1, y: 2 })
+
+    expect(await queue.peek('room-queue-3')).toEqual([])
+  })
+
+  it('does not queue when peers are already connected — only the truly isolated case', async () => {
+    const { alice } = wireTwoPeers('room-queue-4')   // alice.peerIds = ['bob'], not isolated
+    const registry = new MessageRegistry().register('chat', { queueOnFail: true })
+    const queue    = new OutboundQueue({ dbName: 'q-rc-4' })
+    const aliceCh  = new RealtimeChannel(alice, { registry, log: new MessageLog(), queue })
+
+    aliceCh.send('chat', { text: 'delivered live, no need to queue' })
+
+    expect(await queue.peek('room-queue-4')).toEqual([])
   })
 })
