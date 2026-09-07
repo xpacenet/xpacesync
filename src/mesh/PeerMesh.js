@@ -1,6 +1,14 @@
 import { XpaceNodePool } from '../transport/XpaceNodePool.js'
 import { RTCPeer }       from '../transport/RTCPeer.js'
 
+// Last-resort fallback only — used when a node has no STUN/TURN of its own
+// configured (see xpacenode's turnCredentials.js) AND the caller passed no
+// explicit override. Google's public STUN is read-only (no relay, no
+// credential, a client just learns its own address) and free with no
+// realistic reliability concern the way a TURN *relay* has — this is not
+// the same class of dependency as the TURN relay this network no longer
+// depends on a third party for. Still replaced automatically the moment a
+// node reports its own STUN/TURN in its 'welcome' message — see join().
 const DEFAULT_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -48,6 +56,7 @@ export class PeerMesh extends EventTarget {
   #onIntro         = null        // optional payload merged into every announce/intro frame
   #localTracks     = []
   #trackCb         = null
+  #iceServersFixed = false       // true once the caller explicitly passed iceServers — see join()
 
   /**
    * @param {object} [opts]
@@ -63,7 +72,10 @@ export class PeerMesh extends EventTarget {
     super()
     if (!selfId) throw new Error('PeerMesh requires selfId')
     this.#selfId     = selfId
-    if (iceServers) this.#iceServers = iceServers
+    if (iceServers) {
+      this.#iceServers      = iceServers
+      this.#iceServersFixed = true   // an explicit override always wins — a node's own welcome never replaces it
+    }
     this.#onIntro    = introPayload ?? (() => ({}))
   }
 
@@ -101,6 +113,21 @@ export class PeerMesh extends EventTarget {
     // a drop — this is the one lifecycle hook that makes reconnection and
     // first-connection share the same path instead of needing separate logic.
     this.#pool.onOpen(() => this.#announce())
+
+    // A node hands out its own STUN/TURN in 'welcome' (see xpacenode's
+    // turnCredentials.js) — always the first message it sends, before any
+    // peer_join/signal could arrive, so this always lands before a single
+    // RTCPeer gets constructed. Ignored entirely if the caller passed an
+    // explicit iceServers override (#iceServersFixed) — that's a deliberate
+    // choice by the consumer app and a node's own opinion never overrides
+    // it. A node with nothing configured sends an empty array, which is
+    // correctly a no-op here (the DEFAULT_ICE_SERVERS fallback stands).
+    this.#pool.on('welcome', msg => {
+      if (this.#iceServersFixed) return
+      if (Array.isArray(msg.iceServers) && msg.iceServers.length > 0) {
+        this.#iceServers = msg.iceServers
+      }
+    })
 
     this.#pool.on('peer_join', async msg => {
       // `t` and `roomId` are the signaling envelope; anything else the
