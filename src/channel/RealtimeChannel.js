@@ -22,7 +22,6 @@ export class RealtimeChannel {
   #mesh
   #registry
   #log
-  #roomId
   #handlers = new Map()   // type → [cb]
 
   /**
@@ -35,7 +34,6 @@ export class RealtimeChannel {
     this.#mesh     = mesh
     this.#registry = registry ?? new MessageRegistry()
     this.#log      = log ?? new MessageLog()
-    this.#roomId   = mesh.roomId
 
     this.#mesh.addEventListener('message', ({ detail }) => {
       const { from, payload } = detail
@@ -52,7 +50,7 @@ export class RealtimeChannel {
     const message  = { type, payload, meta: { from: this.#mesh.selfId, ts: Date.now() } }
 
     this.#mesh.broadcast(message)
-    if (strategy.persist) this.#log.append(this.#roomId, type, message)
+    if (strategy.persist) this.#log.append(this.#mesh.roomId, type, message)
     return message
   }
 
@@ -67,7 +65,7 @@ export class RealtimeChannel {
     const message  = { type, payload, meta: { from: this.#mesh.selfId, ts: Date.now() } }
 
     this.#mesh.send(peerId, message)
-    if (strategy.persist) this.#log.append(this.#roomId, type, message)
+    if (strategy.persist) this.#log.append(this.#mesh.roomId, type, message)
     return message
   }
 
@@ -85,14 +83,14 @@ export class RealtimeChannel {
    * types registered `persist: true` — others were never logged).
    */
   async history (type, opts) {
-    return this.#log.replay(this.#roomId, type, opts)
+    return this.#log.replay(this.#mesh.roomId, type, opts)
   }
 
   #receive (from, message) {
     const { type, payload, meta } = message ?? {}
     if (!type) return
     const strategy = this.#registry.get(type)
-    if (strategy.persist) this.#log.append(this.#roomId, type, message)
+    if (strategy.persist) this.#log.append(this.#mesh.roomId, type, message)
     this.#handlers.get(type)?.forEach(cb => cb({ from, payload, meta }))
   }
 }

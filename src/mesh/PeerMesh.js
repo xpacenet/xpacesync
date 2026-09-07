@@ -125,6 +125,18 @@ export class PeerMesh extends EventTarget {
     this.#peers.get(peerId)?.peer.send(payload)
   }
 
+  /**
+   * Raw RTCPeerConnection per currently-connected peer, keyed by peerId.
+   * Exists for callers that need WebRTC-level access PeerMesh doesn't wrap
+   * itself — e.g. inspecting existing inbound media receivers for a track
+   * that arrived before a consumer's onTrack callback was registered.
+   */
+  getPeerConnections () {
+    const out = {}
+    for (const [peerId, { peer }] of this.#peers) out[peerId] = peer.pc
+    return out
+  }
+
   /** Send `payload` to every peer currently connected. */
   broadcast (payload) {
     for (const { peer } of this.#peers.values()) peer.send(payload)
