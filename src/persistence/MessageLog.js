@@ -53,22 +53,34 @@ export class MessageLog {
     return this.#dbPromise
   }
 
-  /** Append one message to the durable log for (roomId, type). */
+  /**
+   * Append one message to the durable log for (roomId, type).
+   * @param {string} roomId
+   * @param {string} type
+   * @param {*} entry Any JSON-serializable value — MessageLog doesn't
+   *   interpret it, only stores and replays it back verbatim.
+   * @returns {Promise<void>}
+   */
   async append (roomId, type, entry) {
     const db = await this.#db()
-    return new Promise((resolve, reject) => {
+    return /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
       const tx    = db.transaction(STORE, 'readwrite')
       const store = tx.objectStore(STORE)
       store.add({ roomId, type, entry, ts: Date.now() })
       tx.oncomplete = () => resolve()
       tx.onerror    = () => reject(tx.error)
-    })
+    }))
   }
 
   /**
    * Replay every stored message for (roomId, type), oldest first.
    * `since` (a timestamp) returns only entries appended after it — used to
    * page or to resume rather than reload the entire history every time.
+   * @param {string} roomId
+   * @param {string} type
+   * @param {object} [opts]
+   * @param {number} [opts.since]
+   * @returns {Promise<any[]>}
    */
   async replay (roomId, type, { since = 0 } = {}) {
     const db = await this.#db()
@@ -77,7 +89,7 @@ export class MessageLog {
       const store = tx.objectStore(STORE)
       const index = store.index('by_room_type')
       const range = IDBKeyRange.only([roomId, type])
-      const out   = []
+      const out   = /** @type {any[]} */ ([])
 
       const req = index.openCursor(range)
       req.onsuccess = () => {
@@ -90,10 +102,14 @@ export class MessageLog {
     })
   }
 
-  /** Remove all logged messages for a room (every type). Used when a user leaves for good. */
+  /**
+   * Remove all logged messages for a room (every type). Used when a user leaves for good.
+   * @param {string} roomId
+   * @returns {Promise<void>}
+   */
   async clearRoom (roomId) {
     const db = await this.#db()
-    return new Promise((resolve, reject) => {
+    return /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
       const tx    = db.transaction(STORE, 'readwrite')
       const store = tx.objectStore(STORE)
       const req   = store.openCursor()
@@ -104,6 +120,6 @@ export class MessageLog {
         cursor.continue()
       }
       req.onerror = () => reject(req.error)
-    })
+    }))
   }
 }

@@ -50,9 +50,12 @@ export class PeerMesh extends EventTarget {
   #trackCb         = null
 
   /**
-   * @param {object} opts
-   * @param {string} opts.selfId       Stable peer identity (any string, e.g. an Ed25519 hex id)
-   * @param {object} [opts.iceServers] Override the default STUN-only ICE server list
+   * @param {object} [opts]
+   * @param {string} [opts.selfId]     Stable peer identity (any string, e.g. an Ed25519 hex
+   *   id) — required in practice (the constructor throws without one); typed optional here
+   *   only because the parameter object itself defaults to `{}`.
+   * @param {Array<{urls: string, username?: string, credential?: string}>} [opts.iceServers]
+   *   Override the default STUN-only ICE server list.
    * @param {() => object} [opts.introPayload] Called each announce/intro — extra fields to merge in
    *   (e.g. a display name). Keeps PeerMesh from needing to know what an "identity" contains.
    */
@@ -166,7 +169,7 @@ export class PeerMesh extends EventTarget {
     const entry = { peer, hasBeenOpen: false }
     this.#peers.set(peerId, entry)
 
-    peer.addEventListener('signal', ({ detail }) => {
+    peer.addEventListener('signal', (/** @type {CustomEvent} */ { detail }) => {
       this.#pool?.send({ t: 'signal', roomId: this.#roomId, to: peerId, payload: detail })
     })
 

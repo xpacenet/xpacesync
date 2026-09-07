@@ -63,16 +63,21 @@ export class OutboundQueue {
     return this.#dbPromise
   }
 
-  /** Queue `message` for the room — delivered to every peer who joins while it's still fresh. */
+  /**
+   * Queue `message` for the room — delivered to every peer who joins while it's still fresh.
+   * @param {string} roomId
+   * @param {*} message
+   * @returns {Promise<void>}
+   */
   async enqueue (roomId, message) {
     const db = await this.#db()
-    await new Promise((resolve, reject) => {
+    await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
       const tx    = db.transaction(STORE, 'readwrite')
       const store = tx.objectStore(STORE)
       store.add({ roomId, message, ts: Date.now() })
       tx.oncomplete = () => resolve()
       tx.onerror    = () => reject(tx.error)
-    })
+    }))
     await this.#pruneExpired(roomId)
   }
 
@@ -81,6 +86,8 @@ export class OutboundQueue {
    * whenever a peer joins and send each returned message directly to them.
    * Non-destructive: the next peer to join sees the same messages, until
    * they expire.
+   * @param {string} roomId
+   * @returns {Promise<any[]>}
    */
   async peek (roomId) {
     await this.#pruneExpired(roomId)
@@ -94,10 +101,11 @@ export class OutboundQueue {
     })
   }
 
+  /** @returns {Promise<void>} */
   async #pruneExpired (roomId) {
     const db     = await this.#db()
     const cutoff = Date.now() - this.#maxAgeMs
-    return new Promise((resolve, reject) => {
+    return /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
       const tx    = db.transaction(STORE, 'readwrite')
       const index = tx.objectStore(STORE).index('by_room')
       const req   = index.openCursor(IDBKeyRange.only(roomId))
@@ -108,6 +116,6 @@ export class OutboundQueue {
         cursor.continue()
       }
       req.onerror = () => reject(req.error)
-    })
+    }))
   }
 }

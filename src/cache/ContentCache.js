@@ -46,7 +46,8 @@ export class ContentCache {
 
   /**
    * @param {(cid: string) => Promise<any>} resolver Fetches bytes for a CID on a cache miss.
-   * @param {number} [maxEntries] Evict the least-recently-used entry once past this count.
+   * @param {object} [opts]
+   * @param {number} [opts.maxEntries] Evict the least-recently-used entry once past this count.
    */
   constructor (resolver, { maxEntries = 200 } = {}) {
     if (typeof resolver !== 'function') {
@@ -88,20 +89,22 @@ export class ContentCache {
     })
   }
 
+  /** @returns {Promise<void>} */
   async #write (cid, value) {
     const db = await this.#db()
-    await new Promise((resolve, reject) => {
+    await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite')
       tx.objectStore(STORE).put({ cid, value, lastUsed: this.#seq++ })
       tx.oncomplete = () => resolve()
       tx.onerror    = () => reject(tx.error)
-    })
+    }))
     await this.#evictIfNeeded()
   }
 
+  /** @returns {Promise<void>} */
   async #touch (cid) {
     const db = await this.#db()
-    return new Promise((resolve, reject) => {
+    return /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
       const tx    = db.transaction(STORE, 'readwrite')
       const store = tx.objectStore(STORE)
       const req   = store.get(cid)
@@ -111,7 +114,7 @@ export class ContentCache {
         resolve()
       }
       req.onerror = () => reject(req.error)
-    })
+    }))
   }
 
   async #evictIfNeeded () {

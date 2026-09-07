@@ -33,9 +33,13 @@ export class XpaceNodePool {
    */
   onOpen (cb) { this.#onOpenCb = cb }
 
+  /**
+   * @param {string} url
+   * @returns {Promise<void>}
+   */
   async connect (url) {
     this.#url = url
-    return new Promise((resolve, reject) => {
+    return /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
       const ws = new WebSocket(url)
       this.#ws = ws
 
@@ -68,7 +72,7 @@ export class XpaceNodePool {
         this.#ready = false
         this.#reconnect()
       }
-    })
+    }))
   }
 
   send (msg) {

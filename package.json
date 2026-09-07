@@ -4,17 +4,25 @@
   "description": "Generalized realtime mesh for xpacenet apps — one transport, every message type, with a durable local log and a content cache, built on xpacenode.",
   "type": "module",
   "main": "src/index.js",
+  "types": "types/index.d.ts",
   "exports": {
-    ".": "./src/index.js"
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    }
   },
   "files": [
-    "src"
+    "src",
+    "types"
   ],
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:types": "tsc",
+    "prepare": "npm run build:types"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",
+    "typescript": "^7.0.2",
     "vitest": "^2.0.0"
   },
   "license": "UNLICENSED"
