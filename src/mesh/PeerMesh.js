@@ -70,7 +70,26 @@ export class PeerMesh extends EventTarget {
   get selfId ()  { return this.#selfId }
   get roomId ()  { return this.#roomId }
   get nodeUrl () { return this.#nodeUrl }
-  get peerIds () { return [...this.#peers.keys()] }
+
+  /**
+   * Peer IDs this mesh can actually reach right now — i.e. their data
+   * channel is open. Deliberately NOT every peer signaling has told us
+   * about: a peer we've just learned of via `peer:join` (or a `signal`
+   * relay) is added to `#peers` immediately so reconnection bookkeeping
+   * has somewhere to live, but its RTCPeerConnection is still negotiating
+   * at that point — `entry.peer.connected` is false until the data channel
+   * itself fires `open`. Callers that need "who is genuinely live" (e.g.
+   * RealtimeChannel's store-carry-forward isolation check) must see that
+   * in-progress peer as absent, not present — otherwise a message sent in
+   * that window is neither broadcast (the channel isn't open yet — send()
+   * silently no-ops) nor queued (peerIds looked non-empty), and is lost
+   * outright with no trace, which is worse than either alternative.
+   */
+  get peerIds () {
+    return [...this.#peers.entries()]
+      .filter(([, entry]) => entry.peer.connected)
+      .map(([peerId]) => peerId)
+  }
 
   /** Connect to one xpacenode and join `roomId`. Resolves once the socket is open. */
   async join (nodeUrl, roomId) {
