@@ -72,6 +72,13 @@ shows up.
   wiring) `ContentCache`, and exposes `send(type, payload)` / `on(type,
   cb)` / `history(type)`.
 
+- **`DirectPeerChannel`** — a deliberately small one-peer, one-message-type
+  route. It filters unrelated peers and protocols, exposes direct/offline
+  state, and reports whether a send reached an open data channel. Encryption,
+  authorization, storage, retries, and product language remain above this
+  layer, so the primitive can be reused by messaging, work, market, payment,
+  device-control, and future applications without product coupling.
+
 ## Example
 
 ```js
