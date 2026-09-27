@@ -97,6 +97,57 @@ describe('CallChannel', () => {
     expect(received).toEqual([{ track, stream }])
   })
 
+  it('retarget() re-points the channel at a different peer without touching localStream/state', () => {
+    const mesh = new FakeMesh()
+    mesh.peerIds = ['bob-laptop', 'bob-phone']
+    const channel = new CallChannel(mesh, { peerId: 'bob-laptop' })
+    const track = fakeTrack()
+    channel.addLocalStream(fakeStream([track]))
+    channel.ring({ video: false })
+    expect(channel.state).toBe('ringing-outbound')
+
+    // The guessed device never actually answers -- a DIFFERENT device of
+    // the same account does (the real founder scenario: fan-out rang both,
+    // the phone answered, the cached relationship pointed at the laptop).
+    const accepted = []
+    channel.addEventListener('accepted', () => accepted.push(true))
+    mesh.emit('message', { from: 'bob-phone', payload: { type: 'spaceinbox.call.v1', payload: { kind: 'accept' } } })
+    // Before retargeting, the real answering peer's message is invisible.
+    expect(channel.state).toBe('ringing-outbound')
+    expect(accepted).toEqual([])
+
+    channel.retarget('bob-phone')
+    expect(channel.peerId).toBe('bob-phone')
+    expect(track.stop).not.toHaveBeenCalled() // localStream untouched
+
+    mesh.emit('message', { from: 'bob-phone', payload: { type: 'spaceinbox.call.v1', payload: { kind: 'accept' } } })
+    expect(channel.state).toBe('active')
+    expect(accepted).toEqual([true])
+
+    // Inbound media from the now-correct peer is surfaced; the stale
+    // guessed peer's is not.
+    const received = []
+    channel.addEventListener('remote-track', ({ detail }) => received.push(detail))
+    const remoteTrack = fakeTrack(), remoteStream = fakeStream([remoteTrack])
+    mesh.emitTrack(remoteTrack, remoteStream, 'bob-laptop')
+    mesh.emitTrack(remoteTrack, remoteStream, 'bob-phone')
+    expect(received).toEqual([{ track: remoteTrack, stream: remoteStream }])
+
+    // Further sends (e.g. hangup) now correctly address the real peer.
+    channel.hangup()
+    expect(mesh.sent.at(-1)).toMatchObject({ peerId: 'bob-phone', payload: { payload: { kind: 'hangup' } } })
+  })
+
+  it('retarget() is a no-op once closed, and a no-op for the same/empty peerId', () => {
+    const mesh = new FakeMesh()
+    const channel = new CallChannel(mesh, { peerId: 'bob' })
+    channel.retarget('bob') // same id -- no-op, no error
+    expect(channel.peerId).toBe('bob')
+    channel.close()
+    channel.retarget('mallory')
+    expect(channel.peerId).toBe('bob') // unchanged -- closed channels never re-point
+  })
+
   it('close() stops local tracks, detaches listeners, and never touches the shared mesh connection', () => {
     const mesh = new FakeMesh()
     const channel = new CallChannel(mesh, { peerId: 'bob' })
