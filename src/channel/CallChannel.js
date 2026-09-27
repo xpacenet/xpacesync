@@ -35,7 +35,7 @@ export class CallChannel extends EventTarget {
   #peerId
   #type
   #closed = false
-  #localStream = null
+  #localTracks = [] // every track ever passed to addLocalStream(), across possibly several calls -- see close()
   #state = 'idle' // idle | ringing-outbound | ringing-inbound | active | ended
 
   /**
@@ -129,11 +129,26 @@ export class CallChannel extends EventTarget {
    * Real getUserMedia() acquisition is the app's job (browser API, not
    * network policy) — this just wires the resulting stream's tracks onto
    * the already-open peer connection via PeerMesh#addTrack().
+   *
+   * Callable more than once per call (e.g. audio at accept-time, then video
+   * added mid-call when the user switches it on) — ACCUMULATES every track
+   * onto `#localTracks` rather than replacing a single `#localStream`
+   * reference outright. The old `this.#localStream = stream` here silently
+   * dropped the reference to whatever was attached before: `close()` only
+   * stopped whatever `#localStream` currently pointed at, so a mid-call
+   * addLocalStream([videoTrack]) call meant hangup left the ORIGINAL mic
+   * track running forever (a real leaked-microphone bug, found while
+   * tracing the v189 mid-call video-switch regression). Tracked as a plain
+   * array rather than a real `MediaStream` so this class stays usable in a
+   * plain Node test environment (no DOM/WebRTC globals) the way every other
+   * method here already is.
    * @param {MediaStream} stream
    */
   addLocalStream (stream) {
-    this.#localStream = stream
-    for (const track of stream.getTracks()) this.#mesh.addTrack(track, stream)
+    for (const track of stream.getTracks()) {
+      if (!this.#localTracks.includes(track)) this.#localTracks.push(track)
+      this.#mesh.addTrack(track, stream)
+    }
   }
 
   /** Stop local tracks and detach listeners. Never touches the shared mesh's connection/room. */
@@ -141,8 +156,8 @@ export class CallChannel extends EventTarget {
     if (this.#closed) return
     this.#closed = true
     this.#mesh.removeEventListener('message', this.#handleMessage)
-    for (const track of this.#localStream?.getTracks() ?? []) track.stop()
-    this.#localStream = null
+    for (const track of this.#localTracks) track.stop()
+    this.#localTracks = []
     this.#setState('ended')
   }
 

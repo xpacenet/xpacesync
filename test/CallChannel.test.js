@@ -148,6 +148,29 @@ describe('CallChannel', () => {
     expect(channel.peerId).toBe('bob') // unchanged -- closed channels never re-point
   })
 
+  it('addLocalStream accumulates tracks across multiple calls (audio at accept, video added mid-call) so close() stops ALL of them', () => {
+    const mesh = new FakeMesh()
+    const channel = new CallChannel(mesh, { peerId: 'bob' })
+    const audioTrack = fakeTrack()
+    channel.addLocalStream(fakeStream([audioTrack])) // accept-time audio
+
+    // v189: turning video on mid-call used to call addLocalStream() again
+    // with a stream containing ONLY the new video track, which used to
+    // silently replace the internal reference to the accept-time audio
+    // track -- close() would then never stop it (a real leaked-mic bug).
+    const videoTrack = fakeTrack()
+    channel.addLocalStream(fakeStream([videoTrack]))
+
+    expect(mesh.tracksAdded).toEqual([
+      { track: audioTrack, stream: expect.anything() },
+      { track: videoTrack, stream: expect.anything() },
+    ])
+
+    channel.close()
+    expect(audioTrack.stop).toHaveBeenCalledTimes(1)
+    expect(videoTrack.stop).toHaveBeenCalledTimes(1)
+  })
+
   it('close() stops local tracks, detaches listeners, and never touches the shared mesh connection', () => {
     const mesh = new FakeMesh()
     const channel = new CallChannel(mesh, { peerId: 'bob' })
