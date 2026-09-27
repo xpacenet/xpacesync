@@ -142,11 +142,31 @@ export class CallChannel extends EventTarget {
    * array rather than a real `MediaStream` so this class stays usable in a
    * plain Node test environment (no DOM/WebRTC globals) the way every other
    * method here already is.
+   * Idempotent per track: a track already attached (by identity, not by
+   * stream) is never re-passed to PeerMesh#addTrack. PeerMesh#addTrack
+   * ultimately reaches RTCPeerConnection#addTrack, which THROWS
+   * ("A sender already exists for the track") if called twice for the same
+   * track — RTCPeer#addTrack swallows that in a try/catch, so calling
+   * addLocalStream twice with an overlapping track used to be a silent
+   * no-op rather than a hard error, but it still re-entered addTrack (and
+   * therefore PeerMesh's own onnegotiationneeded-triggering path) for a
+   * track that was already live, real wasted work on every repeated
+   * add/toggle. Found while tracing the founder's real-device report of
+   * mid-call video toggling becoming unreliable after being cycled
+   * on/off/on several times — this alone was not reproduced as sufficient
+   * to explain that report end-to-end (this class has no memory of
+   * *disabling* a track, only of ever having attached one, and SpaceHub's
+   * own toggle-off path never calls addLocalStream again for a track it
+   * already has — see index.html's setCallVideo), but it is a real,
+   * independently-worth-fixing correctness gap in its own right, and one
+   * fewer redundant renegotiation trigger in a class of bug where
+   * renegotiation-storm/glare was the leading suspect.
    * @param {MediaStream} stream
    */
   addLocalStream (stream) {
     for (const track of stream.getTracks()) {
-      if (!this.#localTracks.includes(track)) this.#localTracks.push(track)
+      if (this.#localTracks.includes(track)) continue
+      this.#localTracks.push(track)
       this.#mesh.addTrack(track, stream)
     }
   }
