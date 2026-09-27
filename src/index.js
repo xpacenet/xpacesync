@@ -1,6 +1,7 @@
 export { PeerMesh }          from './mesh/PeerMesh.js'
 export { RealtimeChannel }   from './channel/RealtimeChannel.js'
 export { DirectPeerChannel } from './channel/DirectPeerChannel.js'
+export { CallChannel }       from './channel/CallChannel.js'
 export { MessageRegistry }   from './registry/MessageRegistry.js'
 export { MessageLog }        from './persistence/MessageLog.js'
 export { ContentCache }      from './cache/ContentCache.js'

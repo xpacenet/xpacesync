@@ -79,6 +79,21 @@ shows up.
   layer, so the primitive can be reused by messaging, work, market, payment,
   device-control, and future applications without product coupling.
 
+- **`CallChannel`** — ring/accept/reject/hangup call signaling plus real
+  media, layered on an *already-joined* `PeerMesh` (the same mesh a
+  conversation's message channel already opened) instead of a second
+  connection. It needs no media transport of its own: `RTCPeer` already has
+  a working `addTrack()`/`onTrack()` pair, and `PeerMesh` already fans both
+  out to every peer connection it holds, so attaching a camera/mic track
+  renegotiates the SAME connection a text conversation is using via the
+  signaling PeerMesh already relays over xpacenode. `CallChannel` only adds
+  the missing call-lifecycle protocol on top, as one more typed message tag
+  (`spaceinbox.call.v1` by convention) alongside `spaceinbox.envelope.v1`
+  and `spaceinbox.device-sync.v1`. Deliberately does not reuse
+  `DirectPeerChannel` — its `close()` calls `mesh.leave()`, which would tear
+  down the conversation's connection along with the call. See the class's
+  own doc comment for the one-callback-per-mesh `onTrack` caveat.
+
 ## Example
 
 ```js
