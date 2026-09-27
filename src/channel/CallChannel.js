@@ -60,6 +60,40 @@ export class CallChannel extends EventTarget {
   get type () { return this.#type }
   get state () { return this.#state }
 
+  /**
+   * Re-point this channel at a DIFFERENT peer on the SAME already-open mesh,
+   * without tearing down localStream, listeners, or call state.
+   *
+   * Why this exists: a caller places a call knowing only a best-guess
+   * "current" peerId for the callee (an app-level cache, e.g. one entry on a
+   * relationship record) -- CallChannel itself has no way to know in advance
+   * which of the callee's possibly-several devices will actually answer.
+   * Once a real accept/ring genuinely arrives from some OTHER peer already
+   * live on this mesh (the app layer, not this class, is what notices this --
+   * see #handleMessage's strict equality check, which is exactly why a
+   * message from the real answering device was being silently ignored before
+   * this existed), the app needs to lock this channel onto that ACTUAL
+   * pairing for every remaining step: further signals, addLocalStream's
+   * already-attached tracks, and -- critically -- #handleTrack's own
+   * from-peer filter, which otherwise drops every inbound audio/video track
+   * from the real peer because it still only recognizes the original guess.
+   *
+   * Deliberately NOT a new CallChannel: reconstructing one would mean
+   * removeEventListener/addEventListener churn the app layer would have to
+   * replicate perfectly, and — the actual reason this is a method here
+   * instead of "just close and reopen" — close() stops every local track,
+   * which would kill the user's own already-acquired mic/camera mid-call
+   * with no way to reacquire the exact same stream. Re-targeting in place
+   * keeps localStream, the mesh listeners, and #state completely untouched;
+   * only #peerId (and therefore who #handleMessage/#handleTrack/#send
+   * address) changes.
+   * @param {string} peerId
+   */
+  retarget (peerId) {
+    if (this.#closed || !peerId || peerId === this.#peerId) return
+    this.#peerId = peerId
+  }
+
   /** Place an outbound call: sends 'ring' describing the requested media. */
   ring ({ video = false } = {}) {
     if (this.#closed) return false
