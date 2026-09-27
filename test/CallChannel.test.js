@@ -171,6 +171,26 @@ describe('CallChannel', () => {
     expect(videoTrack.stop).toHaveBeenCalledTimes(1)
   })
 
+  it('addLocalStream is idempotent per track: calling it again with an ALREADY-attached track never re-calls PeerMesh#addTrack', () => {
+    // Found while tracing the founder's real-device report of repeated
+    // video on/off/on toggling becoming unreliable: PeerMesh#addTrack
+    // reaches RTCPeerConnection#addTrack, which throws if called twice for
+    // the identical track (RTCPeer#addTrack swallows that in a try/catch,
+    // so this was a silent no-op rather than a visible error) -- but it
+    // still re-entered the mesh's addTrack/onnegotiationneeded-triggering
+    // path for a track that was already live. A real, independently
+    // worth-fixing correctness gap even though it wasn't found to be
+    // SpaceHub's own toggle path's proximate cause (setCallVideo's "on"
+    // path never re-calls addLocalStream for a track it already has).
+    const mesh = new FakeMesh()
+    const channel = new CallChannel(mesh, { peerId: 'bob' })
+    const track = fakeTrack()
+    const stream = fakeStream([track])
+    channel.addLocalStream(stream)
+    channel.addLocalStream(stream) // same track, called again
+    expect(mesh.tracksAdded).toEqual([{ track, stream }]) // only once
+  })
+
   it('close() stops local tracks, detaches listeners, and never touches the shared mesh connection', () => {
     const mesh = new FakeMesh()
     const channel = new CallChannel(mesh, { peerId: 'bob' })
