@@ -125,6 +125,30 @@ export class CallChannel extends EventTarget {
   }
 
   /**
+   * Tell the peer whether THIS side's video is currently live, independent
+   * of ring/accept/reject/hangup. Added for the "both sides turn video off
+   * mid-call" bug: turning video off is purely local (setCallVideo just sets
+   * `track.enabled = false` -- there is no removeTrack/renegotiation to
+   * notice on the receiving end), so before this existed the peer had no
+   * way to learn "their camera just went off" versus "their camera track
+   * just hasn't sent a new frame in a while" -- the app layer was left
+   * inferring peer video state only from whether a video track had EVER
+   * arrived (sticky-forever), which is wrong the moment a peer turns their
+   * camera back off: the receiving side kept showing a blank/black remote
+   * pane instead of falling back to an audio-call UI, because nothing ever
+   * told it the peer's video had gone quiet. This is an explicit, real
+   * signal for that transition in both directions (on and off), sent
+   * whenever the local video toggle changes and additionally whenever
+   * screen-share starts/stops (since either can flip whether this side has
+   * live video for the other end to react to).
+   * @param {boolean} on
+   */
+  setVideoState (on) {
+    if (this.#closed) return false
+    return this.#send({ kind: 'video-state', on: !!on })
+  }
+
+  /**
    * Attach local media tracks to the shared mesh connection for this peer.
    * Real getUserMedia() acquisition is the app's job (browser API, not
    * network policy) — this just wires the resulting stream's tracks onto
@@ -205,6 +229,8 @@ export class CallChannel extends EventTarget {
     } else if (signal?.kind === 'hangup') {
       this.#setState('ended')
       this.dispatchEvent(new CustomEvent('hangup'))
+    } else if (signal?.kind === 'video-state') {
+      this.dispatchEvent(new CustomEvent('video-state', { detail: { on: !!signal.on } }))
     }
   }
 
