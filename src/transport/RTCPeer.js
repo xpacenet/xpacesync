@@ -19,10 +19,35 @@ export class RTCPeer extends EventTarget {
   #onTrackCb       = null
   #iceQueue        = []
   #hasRemoteDesc   = false
+  // Set whenever #negotiate is asked to run (onnegotiationneeded fires, or a
+  // glare-recovery retry is scheduled) while the connection ISN'T in
+  // 'stable' -- e.g. addTrack() called for a mid-call video toggle while the
+  // call's own initial audio offer/answer, or another track's renegotiation,
+  // is still in flight. The spec says onnegotiationneeded re-fires once the
+  // connection returns to 'stable' if negotiation is still needed, and
+  // that's exactly what this class relied on before this existed -- but
+  // that re-fire is engine-internal bookkeeping this class has no visibility
+  // into, and the exact same file already documents a real, confirmed gap
+  // between what the spec promises and what a WebKit build actually does
+  // (implicit rollback -- see handleSignal's own comment on it). Given the
+  // real-device report this was added for (a mid-call video track added
+  // ONCE, correctly, via addTrack -- confirmed by reading CallChannel's own
+  // idempotent-per-track logic -- that then NEVER reaches the peer, on
+  // either platform, across an entire test session with no successful
+  // renegotiation ever observed) is exactly the symptom of a missed
+  // onnegotiationneeded re-fire, this makes the retry EXPLICIT instead of
+  // trusting the engine to remember on our behalf: onsignalingstatechange
+  // below re-invokes #negotiate the moment 'stable' is reached again, using
+  // this flag rather than a fixed timer, so it fires as soon as the
+  // connection is actually able to negotiate rather than a guessed delay.
+  #negotiationPending = false
 
   #negotiate = async () => {
-    if (this.#makingOffer) return
-    if (this.#pc.signalingState !== 'stable') return
+    if (this.#makingOffer || this.#pc.signalingState !== 'stable') {
+      this.#negotiationPending = true
+      return
+    }
+    this.#negotiationPending = false
     try {
       this.#makingOffer = true
       await this.#pc.setLocalDescription()
@@ -60,6 +85,16 @@ export class RTCPeer extends EventTarget {
     }
 
     this.#pc.onnegotiationneeded = this.#negotiate
+
+    // Explicit backstop for #negotiationPending (see its own doc comment):
+    // the moment the connection is actually able to negotiate again, retry
+    // any negotiation #negotiate had to defer instead of trusting the
+    // engine's own onnegotiationneeded-refires-on-stable bookkeeping alone.
+    this.#pc.onsignalingstatechange = () => {
+      if (this.#pc.signalingState === 'stable' && this.#negotiationPending) {
+        this.#negotiate()
+      }
+    }
 
     this.#pc.ontrack = ({ track, streams }) => {
       const stream = streams[0] ?? new MediaStream([track])
@@ -156,7 +191,27 @@ export class RTCPeer extends EventTarget {
     if (this.#dc?.readyState === 'open') this.#dc.send(JSON.stringify(msg))
   }
 
-  addTrack (track, stream) { try { this.#pc.addTrack(track, stream) } catch {} }
+  // v2 (real-device video bug hunt): this used to swallow every addTrack
+  // failure with an empty catch -- CallChannel's own doc comment already
+  // notes RTCPeerConnection#addTrack throws on a genuine double-add (which
+  // CallChannel's idempotent-per-track check now prevents), but ANY OTHER
+  // real failure here (a closed connection, an engine-specific rejection on
+  // real mobile hardware, anything not yet seen in this sandbox) was
+  // previously invisible: the track is silently never sent, with nothing in
+  // the console and no event for the app layer to react to -- exactly
+  // indistinguishable, from the outside, from "sent fine but the peer's
+  // rendering pipeline dropped it," which is the ambiguity blocking a real
+  // diagnosis of the founder's "camera turns on locally, never appears on
+  // the peer's side" report. Logging every failure (not just the expected
+  // double-add case) turns the next real-device console capture into actual
+  // evidence instead of another guess.
+  addTrack (track, stream) {
+    try {
+      this.#pc.addTrack(track, stream)
+    } catch (err) {
+      console.warn('[RTCPeer] addTrack failed -- track was NOT sent to the peer', track?.kind, track?.id, err)
+    }
+  }
 
   onMessage (cb) { this.#onMessageCb = cb }
   onTrack   (cb) { this.#onTrackCb   = cb }
