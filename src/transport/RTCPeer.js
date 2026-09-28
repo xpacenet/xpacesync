@@ -89,6 +89,31 @@ export class RTCPeer extends EventTarget {
         this.#ignoreOffer   = !this.#isPolite && collision
         if (this.#ignoreOffer) return
 
+        // Glare, polite side: our own outstanding local offer has to yield
+        // to the peer's. setRemoteDescription() below is SPEC'D to perform
+        // this rollback implicitly when called with an offer while in
+        // 'have-local-offer' — Chrome and Firefox honor that, but not every
+        // WebKit/Safari build does (a real, documented cross-engine gap in
+        // "implicit rollback" support that predates a lot of iOS still in
+        // the field). Relying on it silently means this exact renegotiation
+        // — a SECOND offer/answer on an already-open connection, exactly
+        // what CallChannel#addLocalStream triggers on accept and on every
+        // later mid-call track add — can throw on setRemoteDescription
+        // instead of rolling back, which the try/catch around this whole
+        // method swallows into a console.warn: the remote offer is never
+        // applied, no answer is ever sent back, and the peer that sent it
+        // is left stuck in 'have-local-offer' forever (exactly "connects,
+        // then nothing exchanges" / "gets stuck mid-call" as reported).
+        // Doing the rollback EXPLICITLY first is behaviorally identical on
+        // engines that already do it implicitly (rollback then apply is
+        // what the implicit path does internally) and is the one extra
+        // step that also works on engines that don't.
+        if (this.#isPolite && hadLocalOffer) {
+          try { await this.#pc.setLocalDescription({ type: 'rollback' }) } catch (err) {
+            console.warn('[RTCPeer] rollback before glare offer failed', err)
+          }
+        }
+
         await this.#pc.setRemoteDescription({ type: 'offer', sdp })
         this.#hasRemoteDesc = true
         await this.#pc.setLocalDescription()
