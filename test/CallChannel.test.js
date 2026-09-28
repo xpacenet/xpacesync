@@ -191,6 +191,44 @@ describe('CallChannel', () => {
     expect(mesh.tracksAdded).toEqual([{ track, stream }]) // only once
   })
 
+  it('setVideoState() sends a typed video-state signal, and the peer\'s video-state signal dispatches an event with the real on/off value', () => {
+    // Added for the "both sides turn video off mid-call goes blank instead
+    // of falling back to an audio UI" bug: setCallVideo's own off path only
+    // ever disables the local track (`enabled = false`), which produces no
+    // renegotiation and no ontrack event on the peer's side at all -- before
+    // this signal existed there was no way for the receiving side to learn
+    // "the peer's video just went off" versus "on," only "a video track
+    // arrived at some point in the past" (sticky-forever). This is an
+    // explicit, symmetric on/off signal independent of ring/accept/hangup.
+    const mesh = new FakeMesh()
+    mesh.peerIds = ['bob']
+    const channel = new CallChannel(mesh, { peerId: 'bob' })
+
+    expect(channel.setVideoState(true)).toBe(true)
+    expect(mesh.sent.at(-1)).toMatchObject({ peerId: 'bob', payload: { type: 'spaceinbox.call.v1', payload: { kind: 'video-state', on: true } } })
+
+    const states = []
+    channel.addEventListener('video-state', ({ detail }) => states.push(detail))
+    mesh.emit('message', { from: 'mallory', payload: { type: 'spaceinbox.call.v1', payload: { kind: 'video-state', on: true } } })
+    mesh.emit('message', { from: 'bob', payload: { type: 'spaceinbox.call.v1', payload: { kind: 'video-state', on: true } } })
+    mesh.emit('message', { from: 'bob', payload: { type: 'spaceinbox.call.v1', payload: { kind: 'video-state', on: false } } })
+
+    // Only bob's (the real peer's) messages are surfaced, and the boolean
+    // round-trips exactly, in order -- both "on" and "off" are real, distinct
+    // transitions, not a one-shot/sticky flag.
+    expect(states).toEqual([{ on: true }, { on: false }])
+    // This signal is purely informational -- it must never touch call state.
+    expect(channel.state).toBe('idle')
+  })
+
+  it('setVideoState() is a no-op once closed', () => {
+    const mesh = new FakeMesh()
+    const channel = new CallChannel(mesh, { peerId: 'bob' })
+    channel.close()
+    expect(channel.setVideoState(true)).toBe(false)
+    expect(mesh.sent).toEqual([])
+  })
+
   it('close() stops local tracks, detaches listeners, and never touches the shared mesh connection', () => {
     const mesh = new FakeMesh()
     const channel = new CallChannel(mesh, { peerId: 'bob' })
