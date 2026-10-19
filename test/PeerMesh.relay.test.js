@@ -123,12 +123,17 @@ describe('PeerMesh relay floor', () => {
     alice.leave(); bob.leave()
   })
 
-  it('peer_leave shrinks the roster so the relay floor stops targeting a departed peer', async () => {
+  it('peer_leave shrinks the roster, stops the relay floor targeting the departed peer, AND fires peer:leave even with no RTCPeer (the relay-only departure)', async () => {
     const { alice, bob } = await joinTwo(new FakeNodeServer())
+    const leaves = []
+    alice.addEventListener('peer:leave', ({ detail }) => leaves.push(detail.peerId))
     expect(alice.knownPeerIds).toEqual(['bob'])
     bob.leave()
     expect(alice.knownPeerIds).toEqual([])
     expect(alice.relayToUnreached({ type: 'x' })).toEqual([])
+    // No RTCPeer entry ever existed for bob (relay-only) -- the departure
+    // must STILL surface as peer:leave, or consumers never despawn him.
+    expect(leaves).toEqual(['bob'])
     alice.leave()
   })
 })

@@ -174,8 +174,16 @@ export class PeerMesh extends EventTarget {
     })
 
     this.#pool.on('peer_leave', msg => {
-      this.#roster.delete(msg.peerId)
+      const wasKnown = this.#roster.delete(msg.peerId)
+      const hadConnection = this.#peers.has(msg.peerId)
       this.#teardownPeer(msg.peerId)
+      // #teardownPeer only dispatches 'peer:leave' when an RTCPeer entry
+      // existed — but a peer can be known purely through signaling with no
+      // connection at all (relay-only policy, or an RTCPeer already torn
+      // down after 'failed'). A room departure must surface either way.
+      if (wasKnown && !hadConnection) {
+        this.dispatchEvent(new CustomEvent('peer:leave', { detail: { peerId: msg.peerId } }))
+      }
     })
 
     this.#pool.on('signal', async msg => {
