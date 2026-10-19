@@ -73,10 +73,18 @@ export class RealtimeChannel {
     const message  = { type, payload, meta: { from: this.#mesh.selfId, ts: Date.now() } }
 
     this.#mesh.broadcast(message)
+    // The relay floor (see MessageRegistry's `relay` strategy): room peers
+    // the mesh has no open data channel to still get this message, through
+    // the xpacenode. Duck-typed so test fakes and older/simpler mesh
+    // implementations without the relay surface keep working unchanged.
+    const relayedTo = (strategy.relay && typeof this.#mesh.relayToUnreached === 'function')
+      ? this.#mesh.relayToUnreached(message)
+      : []
     if (strategy.persist) this.#log.append(this.#mesh.roomId, type, message)
-    // Isolated (no one to broadcast to right now) — queue it for the room
-    // rather than let it vanish the instant it left the sender's memory.
-    if (strategy.queueOnFail && this.#mesh.peerIds.length === 0) {
+    // Isolated (no one to broadcast to right now, and the relay floor
+    // reached no one either) — queue it for the room rather than let it
+    // vanish the instant it left the sender's memory.
+    if (strategy.queueOnFail && this.#mesh.peerIds.length === 0 && relayedTo.length === 0) {
       this.#queue.enqueue(this.#mesh.roomId, message)
     }
     return message
@@ -95,7 +103,13 @@ export class RealtimeChannel {
     const strategy = this.#registry.get(type)
     const message  = { type, payload, meta: { from: this.#mesh.selfId, ts: Date.now() } }
 
-    this.#mesh.send(peerId, message)
+    const sent = this.#mesh.send(peerId, message)
+    // Relay floor for the point-to-point case: no open channel to this
+    // peer right now (returned false) — a relay-flagged type goes through
+    // the xpacenode instead of simply failing.
+    if (!sent && strategy.relay && typeof this.#mesh.relayTo === 'function') {
+      this.#mesh.relayTo(peerId, message)
+    }
     if (strategy.persist) this.#log.append(this.#mesh.roomId, type, message)
     return message
   }

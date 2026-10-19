@@ -4,14 +4,14 @@ import { MessageRegistry } from '../src/registry/MessageRegistry.js'
 describe('MessageRegistry', () => {
   it('returns the mesh/no-persist/no-queue default for an unregistered type', () => {
     const registry = new MessageRegistry()
-    expect(registry.get('unknown')).toEqual({ persist: false, transport: 'mesh', queueOnFail: false })
+    expect(registry.get('unknown')).toEqual({ persist: false, transport: 'mesh', queueOnFail: false, relay: false })
     expect(registry.has('unknown')).toBe(false)
   })
 
   it('remembers a registered strategy exactly', () => {
     const registry = new MessageRegistry()
     registry.register('chat', { persist: true })
-    expect(registry.get('chat')).toEqual({ persist: true, transport: 'mesh', queueOnFail: false })
+    expect(registry.get('chat')).toEqual({ persist: true, transport: 'mesh', queueOnFail: false, relay: false })
     expect(registry.has('chat')).toBe(true)
   })
 
@@ -20,8 +20,8 @@ describe('MessageRegistry', () => {
     registry.register('chat', { persist: true })
     registry.register('photo', { persist: false, transport: 'contentStore' })
 
-    expect(registry.get('chat')).toEqual({ persist: true, transport: 'mesh', queueOnFail: false })
-    expect(registry.get('photo')).toEqual({ persist: false, transport: 'contentStore', queueOnFail: false })
+    expect(registry.get('chat')).toEqual({ persist: true, transport: 'mesh', queueOnFail: false, relay: false })
+    expect(registry.get('photo')).toEqual({ persist: false, transport: 'contentStore', queueOnFail: false, relay: false })
     expect(registry.types().sort()).toEqual(['chat', 'photo'])
   })
 
@@ -32,6 +32,16 @@ describe('MessageRegistry', () => {
 
     expect(registry.get('chat').queueOnFail).toBe(true)
     expect(registry.get('move').queueOnFail).toBe(false)
+  })
+
+  it('relay defaults to false and is an independent per-type opt-in (the server-relay floor)', () => {
+    const registry = new MessageRegistry()
+    registry.register('tick', { relay: true })
+    registry.register('chat', { persist: true })
+
+    expect(registry.get('tick').relay).toBe(true)
+    expect(registry.get('chat').relay).toBe(false)
+    expect(registry.get('never-registered').relay).toBe(false)
   })
 
   it('register() is idempotent-overwrite, not additive', () => {

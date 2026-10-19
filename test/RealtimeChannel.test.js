@@ -206,3 +206,85 @@ describe('RealtimeChannel', () => {
     expect(await queue.peek('room-queue-4')).toEqual([])
   })
 })
+
+/**
+ * The relay floor at the channel layer (see PeerMesh.relay.test.js for the
+ * same mechanism driven through real PeerMesh instances): a `relay: true`
+ * type reaches rostered-but-unconnected peers through the mesh's relay
+ * surface; everything else behaves exactly as before — including on meshes
+ * (and test fakes like the base FakeMesh above) that have no relay surface
+ * at all.
+ */
+class RelayFakeMesh extends FakeMesh {
+  constructor (selfId, roomId) {
+    super(selfId, roomId)
+    this.relayedBroadcasts = []   // messages handed to relayToUnreached
+    this.relayedDirect     = []   // { peerId, message } handed to relayTo
+    this.unreached         = []   // peerIds relayToUnreached pretends to reach
+  }
+  relayToUnreached (message) {
+    this.relayedBroadcasts.push(message)
+    return [...this.unreached]
+  }
+  relayTo (peerId, message) {
+    this.relayedDirect.push({ peerId, message })
+    return true
+  }
+}
+
+describe('RealtimeChannel relay strategy', () => {
+  it('send() of a relay:true type hands the message to the mesh relay floor; a default type never does', () => {
+    const mesh     = new RelayFakeMesh('alice', 'room-relay-1')
+    mesh.unreached = ['bob']
+    const registry = new MessageRegistry()
+      .register('tick', { relay: true })
+      .register('chat', {})
+    const channel  = new RealtimeChannel(mesh, { registry, log: new MessageLog() })
+
+    channel.send('tick', { x: 1 })
+    channel.send('chat', { text: 'hi' })
+
+    expect(mesh.relayedBroadcasts).toHaveLength(1)
+    expect(mesh.relayedBroadcasts[0].type).toBe('tick')
+    expect(mesh.relayedBroadcasts[0].payload).toEqual({ x: 1 })
+  })
+
+  it('send() of a relay:true type on a mesh WITHOUT a relay surface does not throw (older meshes, simple fakes)', () => {
+    const { alice } = wireTwoPeers('room-relay-2')   // base FakeMesh — no relayToUnreached
+    const registry  = new MessageRegistry().register('tick', { relay: true })
+    const channel   = new RealtimeChannel(alice, { registry, log: new MessageLog() })
+
+    expect(() => channel.send('tick', { x: 1 })).not.toThrow()
+  })
+
+  it('queueOnFail still queues when isolated AND the relay reached no one, but not when the relay reached someone', async () => {
+    const reachedNoOne = new RelayFakeMesh('alice', 'room-relay-3') // peerIds [], unreached []
+    const registry  = new MessageRegistry().register('chat', { relay: true, queueOnFail: true })
+    const emptyQ    = new OutboundQueue({ dbName: 'q-relay-3a' })
+    new RealtimeChannel(reachedNoOne, { registry, log: new MessageLog(), queue: emptyQ })
+      .send('chat', { text: 'truly isolated' })
+    expect(await emptyQ.peek('room-relay-3')).toHaveLength(1)
+
+    const reachedBob = new RelayFakeMesh('alice', 'room-relay-4')
+    reachedBob.unreached = ['bob']                                  // relay floor delivers
+    const servedQ = new OutboundQueue({ dbName: 'q-relay-3b' })
+    new RealtimeChannel(reachedBob, { registry, log: new MessageLog(), queue: servedQ })
+      .send('chat', { text: 'relayed, not queued' })
+    expect(await servedQ.peek('room-relay-4')).toEqual([])
+  })
+
+  it('sendTo() falls back to the relay for a relay:true type only when no open channel carried it', () => {
+    const mesh     = new RelayFakeMesh('alice', 'room-relay-5')     // no peers — send() returns false
+    const registry = new MessageRegistry()
+      .register('tick', { relay: true })
+      .register('chat', {})
+    const channel  = new RealtimeChannel(mesh, { registry, log: new MessageLog() })
+
+    channel.sendTo('bob', 'tick', { x: 2 })   // unreachable + relay:true → relayed
+    channel.sendTo('bob', 'chat', { text: 'hi' }) // unreachable + no relay flag → dropped (unchanged behavior)
+
+    expect(mesh.relayedDirect).toHaveLength(1)
+    expect(mesh.relayedDirect[0].peerId).toBe('bob')
+    expect(mesh.relayedDirect[0].message.type).toBe('tick')
+  })
+})

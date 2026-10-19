@@ -43,11 +43,18 @@ const DEFAULT_ICE_SERVERS = [
  *                                                  peer:join's announced, confirmed
  *                                                  peer-to-peer rather than via signaling)
  *   peer:leave   detail: { peerId }
- *   message      detail: { from, payload }      — any non-protocol data-channel message
+ *   message      detail: { from, payload, via? } — any non-protocol message. `via: 'relay'`
+ *                                                  marks one that arrived through the
+ *                                                  xpacenode relay floor instead of a data
+ *                                                  channel (see relayTo below); consumers
+ *                                                  that don't care never need to look.
  */
 export class PeerMesh extends EventTarget {
   #pool            = null
   #peers           = new Map()   // peerId → { peer: RTCPeer, hasBeenOpen: boolean }
+  #roster          = new Map()   // peerId → announced — everyone signaling says is in the
+                                 // room, INDEPENDENT of whether a WebRTC connection to them
+                                 // exists (that's #peers). The relay floor targets this set.
   #selfId          = ''
   #roomId          = ''
   #nodeUrl         = ''
@@ -57,6 +64,8 @@ export class PeerMesh extends EventTarget {
   #localTracks     = []
   #trackCb         = null
   #iceServersFixed = false       // true once the caller explicitly passed iceServers — see join()
+  #transportPolicy = 'auto'      // 'auto' (P2P + relay floor) | 'relay-only' (never dial WebRTC)
+  #poolFactory     = () => new XpaceNodePool()
 
   /**
    * @param {object} [opts]
@@ -67,8 +76,16 @@ export class PeerMesh extends EventTarget {
    *   Override the default STUN-only ICE server list.
    * @param {() => object} [opts.introPayload] Called each announce/intro — extra fields to merge in
    *   (e.g. a display name). Keeps PeerMesh from needing to know what an "identity" contains.
+   * @param {'auto'|'relay-only'} [opts.transportPolicy] 'auto' (default): negotiate WebRTC
+   *   to every room peer, with the xpacenode relay available as a floor for relay-flagged
+   *   message types (see MessageRegistry). 'relay-only': never construct an RTCPeer at all —
+   *   every message rides the relay. For environments where WebRTC is unavailable or
+   *   deliberately disabled, and for QA that needs to prove the relay floor on its own.
+   * @param {() => XpaceNodePool} [opts.poolFactory] Injectable signaling-transport factory
+   *   (tests substitute an in-memory pool; same posture as the class injection seams
+   *   consumers like the Orb's WorldNet already use for this class itself).
    */
-  constructor ({ selfId, iceServers, introPayload } = {}) {
+  constructor ({ selfId, iceServers, introPayload, transportPolicy, poolFactory } = {}) {
     super()
     if (!selfId) throw new Error('PeerMesh requires selfId')
     this.#selfId     = selfId
@@ -77,6 +94,8 @@ export class PeerMesh extends EventTarget {
       this.#iceServersFixed = true   // an explicit override always wins — a node's own welcome never replaces it
     }
     this.#onIntro    = introPayload ?? (() => ({}))
+    if (transportPolicy === 'relay-only') this.#transportPolicy = 'relay-only'
+    if (poolFactory) this.#poolFactory = poolFactory
   }
 
   get selfId ()  { return this.#selfId }
@@ -103,11 +122,21 @@ export class PeerMesh extends EventTarget {
       .map(([peerId]) => peerId)
   }
 
+  /**
+   * Everyone signaling currently says is in this room, whether or not a
+   * WebRTC connection to them exists or ever will. `peerIds` answers "who
+   * can I reach over a data channel right now"; this answers "who is HERE".
+   * The relay floor (relayToUnreached) sends to the difference.
+   */
+  get knownPeerIds () {
+    return [...this.#roster.keys()]
+  }
+
   /** Connect to one xpacenode and join `roomId`. Resolves once the socket is open. */
   async join (nodeUrl, roomId) {
     this.#roomId  = roomId
     this.#nodeUrl = nodeUrl
-    this.#pool    = new XpaceNodePool()
+    this.#pool    = this.#poolFactory()
 
     // Re-announce on every (re)connect, including automatic reconnects after
     // a drop — this is the one lifecycle hook that makes reconnection and
@@ -136,6 +165,7 @@ export class PeerMesh extends EventTarget {
       // what those fields mean, only that they arrived alongside peerId.
       const { peerId, t: _t, roomId: _roomId, ...announced } = msg
       if (peerId === this.#selfId) return
+      this.#roster.set(peerId, announced)
       this.dispatchEvent(new CustomEvent('peer:join', { detail: { peerId, announced } }))
       // A peer_join for someone we already track is normal on every
       // reconnect (both sides restate presence). Only rebuild the
@@ -143,13 +173,27 @@ export class PeerMesh extends EventTarget {
       await this.#ensureLivePeer(peerId)
     })
 
-    this.#pool.on('peer_leave', msg => this.#teardownPeer(msg.peerId))
+    this.#pool.on('peer_leave', msg => {
+      this.#roster.delete(msg.peerId)
+      this.#teardownPeer(msg.peerId)
+    })
 
     this.#pool.on('signal', async msg => {
       const { from, payload } = msg
       if (!from || !payload) return
       await this.#ensureLivePeer(from)
       await this.#peers.get(from)?.peer.handleSignal(payload)
+    })
+
+    // The relay floor's inbound half: a message another peer sent through
+    // the xpacenode (see relayTo below) arrives here and is handed up as
+    // the SAME 'message' event a data-channel delivery produces — layers
+    // above (RealtimeChannel and everything on it) need no second code
+    // path for it. `via: 'relay'` is informational only.
+    this.#pool.on('relay', msg => {
+      const { from, payload } = msg
+      if (!from || from === this.#selfId || payload === undefined) return
+      this.dispatchEvent(new CustomEvent('message', { detail: { from, payload, via: 'relay' } }))
     })
 
     await this.#pool.connect(nodeUrl)
@@ -166,6 +210,7 @@ export class PeerMesh extends EventTarget {
     this.#pool?.close()
     for (const { peer } of this.#peers.values()) peer.close()
     this.#peers.clear()
+    this.#roster.clear()
     this.#pool = null
   }
 
@@ -198,6 +243,51 @@ export class PeerMesh extends EventTarget {
   /** Send `payload` to every peer currently connected. */
   broadcast (payload) {
     for (const { peer } of this.#peers.values()) peer.send(payload)
+  }
+
+  // ── The relay floor (outbound half) ────────────────────────────────────
+  // Why this exists: before it, the ONLY transport for application messages
+  // was the P2P data channel — the xpacenode carried signaling and nothing
+  // else. Any peer pair whose WebRTC negotiation failed or stalled (NAT
+  // combinations ICE can't crack, a mobile engine quirk, UDP-hostile
+  // networks) was silently, mutually invisible FOREVER, even though both
+  // sides held a live socket to a server that knew they were in the same
+  // room. These two methods close that hole: the message rides the already-
+  // open signaling socket, the node forwards it (locally or across the
+  // swarm via gossip, same as a 'signal' frame), and it arrives as a normal
+  // 'message' event on the other side. Per-message opt-in is decided above
+  // this class (MessageRegistry's `relay` strategy) — PeerMesh just carries.
+
+  /**
+   * Relay `payload` to one peer through the xpacenode instead of a data
+   * channel. Fire-and-forget like send(); the pool buffers across
+   * reconnects.
+   * @returns {boolean} false only when the mesh has never joined (no pool).
+   */
+  relayTo (peerId, payload) {
+    if (!this.#pool) return false
+    this.#pool.send({ t: 'relay', roomId: this.#roomId, to: peerId, payload })
+    return true
+  }
+
+  /**
+   * Relay `payload` to every peer signaling says is in the room but whose
+   * data channel is NOT open right now — still negotiating, failed, or
+   * (under transportPolicy 'relay-only') never attempted. Peers with an
+   * open channel are deliberately skipped: the caller already broadcast()
+   * to them, and both operations happen in the same synchronous turn, so a
+   * channel cannot flip state in between — no peer ever gets both copies.
+   * @returns {string[]} the peerIds a relay copy was sent toward.
+   */
+  relayToUnreached (payload) {
+    if (!this.#pool) return []
+    const relayed = []
+    for (const peerId of this.#roster.keys()) {
+      if (this.#peers.get(peerId)?.peer.connected) continue
+      this.#pool.send({ t: 'relay', roomId: this.#roomId, to: peerId, payload })
+      relayed.push(peerId)
+    }
+    return relayed
   }
 
   /** Attach a local media track to every current and future peer connection. */
@@ -267,6 +357,10 @@ export class PeerMesh extends EventTarget {
    * first-time negotiation, not a stale session.
    */
   async #ensureLivePeer (peerId) {
+    // relay-only: never dial WebRTC at all — the relay floor carries
+    // everything. Inbound 'signal' frames for a peer we never created are
+    // already a safe no-op at the call site (optional chaining).
+    if (this.#transportPolicy === 'relay-only') return
     const entry = this.#peers.get(peerId)
     if (entry) {
       const isDead = entry.hasBeenOpen && !entry.peer.connected

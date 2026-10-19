@@ -28,9 +28,24 @@
  *                          where a delayed delivery still means something
  *                          (chat); a stale position update queued for
  *                          hours would just be wrong once delivered.
+ *     relay:     boolean   Server-relay floor: when send() finds room peers
+ *                          the mesh has no OPEN data channel to (WebRTC
+ *                          still negotiating, or failed outright — the
+ *                          cross-NAT pair whose ICE never completes), a
+ *                          copy of the message is relayed to each of them
+ *                          through the xpacenode the mesh is already
+ *                          connected to (the same socket signaling rides).
+ *                          P2P stays the fast path when it works; the relay
+ *                          is the always-on floor so peers in a room can
+ *                          ALWAYS reach each other. Default false — opt in
+ *                          per type: right for small, frequent, loss-
+ *                          tolerant state (presence ticks, signaling
+ *                          envelopes), wrong for bulk payloads (the node's
+ *                          bridge caps frames at 64KB, and every relayed
+ *                          byte is server bandwidth).
  *   }
  */
-const DEFAULT_STRATEGY = Object.freeze({ persist: false, transport: 'mesh', queueOnFail: false })
+const DEFAULT_STRATEGY = Object.freeze({ persist: false, transport: 'mesh', queueOnFail: false, relay: false })
 
 export class MessageRegistry {
   #types = new Map()
