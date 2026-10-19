@@ -288,3 +288,44 @@ describe('RealtimeChannel relay strategy', () => {
     expect(mesh.relayedDirect[0].message.type).toBe('tick')
   })
 })
+
+describe('RealtimeChannel coalesce + via (realtime hardening)', () => {
+  class CoalesceFakeMesh extends RelayFakeMesh {
+    relayToUnreached (message, opts) {
+      this.lastOpts = opts
+      return super.relayToUnreached(message)
+    }
+    relayTo (peerId, message, opts) {
+      this.lastDirectOpts = opts
+      return super.relayTo(peerId, message)
+    }
+  }
+
+  it('passes the type as coalesceKey to the mesh relay for coalesce:true types, and no key otherwise', () => {
+    const mesh = new CoalesceFakeMesh('alice', 'room-co-1')
+    const registry = new MessageRegistry()
+      .register('tick',   { relay: true, coalesce: true })
+      .register('signal', { relay: true })
+    const channel = new RealtimeChannel(mesh, { registry, log: new MessageLog() })
+
+    channel.send('tick', { x: 1 })
+    expect(mesh.lastOpts).toEqual({ coalesceKey: 'tick' })
+    channel.send('signal', { sdp: 'x' })
+    expect(mesh.lastOpts).toEqual({ coalesceKey: undefined })
+
+    channel.sendTo('bob', 'tick', { x: 2 })
+    expect(mesh.lastDirectOpts).toEqual({ coalesceKey: 'tick' })
+  })
+
+  it('forwards via to handlers so consumers can tell relay-carried messages from data-channel ones', () => {
+    const mesh = new CoalesceFakeMesh('alice', 'room-co-2')
+    const registry = new MessageRegistry().register('tick', { relay: true })
+    const channel = new RealtimeChannel(mesh, { registry, log: new MessageLog() })
+
+    const got = []
+    channel.on('tick', msg => got.push(msg.via))
+    mesh.dispatchEvent(new CustomEvent('message', { detail: { from: 'bob', payload: { type: 'tick', payload: {}, meta: {} }, via: 'relay' } }))
+    mesh.dispatchEvent(new CustomEvent('message', { detail: { from: 'bob', payload: { type: 'tick', payload: {}, meta: {} } } }))
+    expect(got).toEqual(['relay', undefined])
+  })
+})

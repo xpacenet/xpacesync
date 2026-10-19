@@ -45,8 +45,8 @@ export class RealtimeChannel {
     this.#queue    = queue ?? new OutboundQueue()
 
     this.#mesh.addEventListener('message', ({ detail }) => {
-      const { from, payload } = detail
-      this.#receive(from, payload)
+      const { from, payload, via } = detail
+      this.#receive(from, payload, via)
     })
 
     // A route just ACTUALLY opened — not merely 'peer:join', which only
@@ -78,7 +78,7 @@ export class RealtimeChannel {
     // the xpacenode. Duck-typed so test fakes and older/simpler mesh
     // implementations without the relay surface keep working unchanged.
     const relayedTo = (strategy.relay && typeof this.#mesh.relayToUnreached === 'function')
-      ? this.#mesh.relayToUnreached(message)
+      ? this.#mesh.relayToUnreached(message, { coalesceKey: strategy.coalesce ? type : undefined })
       : []
     if (strategy.persist) this.#log.append(this.#mesh.roomId, type, message)
     // Isolated (no one to broadcast to right now, and the relay floor
@@ -108,7 +108,7 @@ export class RealtimeChannel {
     // peer right now (returned false) — a relay-flagged type goes through
     // the xpacenode instead of simply failing.
     if (!sent && strategy.relay && typeof this.#mesh.relayTo === 'function') {
-      this.#mesh.relayTo(peerId, message)
+      this.#mesh.relayTo(peerId, message, { coalesceKey: strategy.coalesce ? type : undefined })
     }
     if (strategy.persist) this.#log.append(this.#mesh.roomId, type, message)
     return message
@@ -131,11 +131,15 @@ export class RealtimeChannel {
     return this.#log.replay(this.#mesh.roomId, type, opts)
   }
 
-  #receive (from, message) {
+  // `via` ('relay' when the mesh carried this over the xpacenode floor,
+  // undefined for a data-channel delivery) is forwarded so consumers can
+  // adapt — e.g. the Orb widens its interpolation window for relay-carried
+  // position ticks. Purely informational; most handlers never look.
+  #receive (from, message, via) {
     const { type, payload, meta } = message ?? {}
     if (!type) return
     const strategy = this.#registry.get(type)
     if (strategy.persist) this.#log.append(this.#mesh.roomId, type, message)
-    this.#handlers.get(type)?.forEach(cb => cb({ from, payload, meta }))
+    this.#handlers.get(type)?.forEach(cb => cb({ from, payload, meta, via }))
   }
 }

@@ -103,6 +103,17 @@ export class PeerMesh extends EventTarget {
   get nodeUrl () { return this.#nodeUrl }
 
   /**
+   * The ICE server list new connections are being built with RIGHT NOW —
+   * the caller's explicit override, or the freshest set the node handed
+   * out ('welcome' at connect, refreshed 'ice' frames afterwards; see
+   * join()). For consumers that construct their own RTCPeerConnections
+   * outside PeerMesh (e.g. dedicated media links): read this at pc
+   * construction time instead of copying config off an old mesh pc, whose
+   * embedded TURN credentials may have aged out.
+   */
+  get iceServers () { return [...this.#iceServers] }
+
+  /**
    * Peer IDs this mesh can actually reach right now — i.e. their data
    * channel is open. Deliberately NOT every peer signaling has told us
    * about: a peer we've just learned of via `peer:join` (or a `signal`
@@ -152,6 +163,23 @@ export class PeerMesh extends EventTarget {
     // it. A node with nothing configured sends an empty array, which is
     // correctly a no-op here (the DEFAULT_ICE_SERVERS fallback stands).
     this.#pool.on('welcome', msg => {
+      if (this.#iceServersFixed) return
+      if (Array.isArray(msg.iceServers) && msg.iceServers.length > 0) {
+        this.#iceServers = msg.iceServers
+      }
+    })
+
+    // Refreshed STUN/TURN credentials, re-issued by the node over the live
+    // connection (riding its heartbeat cadence) BEFORE the welcome-issued
+    // ones age out. Without this, any RTCPeer constructed after the
+    // credential TTL (~1h) on a long-lived session got DEAD TURN — exactly
+    // the lazily-created connections a newly-joining peer triggers — so
+    // cross-NAT pairs silently lost their relay candidates. Same precedence
+    // rule as welcome: an explicit caller override is never replaced. Only
+    // RTCPeers created from now on pick the refresh up (an existing
+    // RTCPeerConnection's ICE config is fixed at construction) — which is
+    // precisely the broken case.
+    this.#pool.on('ice', msg => {
       if (this.#iceServersFixed) return
       if (Array.isArray(msg.iceServers) && msg.iceServers.length > 0) {
         this.#iceServers = msg.iceServers
@@ -270,11 +298,23 @@ export class PeerMesh extends EventTarget {
    * Relay `payload` to one peer through the xpacenode instead of a data
    * channel. Fire-and-forget like send(); the pool buffers across
    * reconnects.
+   * @param {string} peerId
+   * @param {object} payload
+   * @param {object} [opts]
+   * @param {string} [opts.coalesceKey] Latest-only class (MessageRegistry
+   *   `coalesce`): a newer relay with the same key supersedes an unsent
+   *   older one, at every hop that can queue — the pool's offline buffer,
+   *   the socket's backlog (see XpaceNodePool.send), and the node's own
+   *   outbound fanout (the frame carries `ck` so the bridge can do the
+   *   same on the receiver's side).
    * @returns {boolean} false only when the mesh has never joined (no pool).
    */
-  relayTo (peerId, payload) {
+  relayTo (peerId, payload, { coalesceKey } = {}) {
     if (!this.#pool) return false
-    this.#pool.send({ t: 'relay', roomId: this.#roomId, to: peerId, payload })
+    this.#pool.send(
+      { t: 'relay', roomId: this.#roomId, to: peerId, payload, ...(coalesceKey ? { ck: coalesceKey } : {}) },
+      { coalesceKey: coalesceKey ? `${coalesceKey}@${peerId}` : undefined },
+    )
     return true
   }
 
@@ -285,14 +325,20 @@ export class PeerMesh extends EventTarget {
    * open channel are deliberately skipped: the caller already broadcast()
    * to them, and both operations happen in the same synchronous turn, so a
    * channel cannot flip state in between — no peer ever gets both copies.
+   * @param {object} payload
+   * @param {object} [opts]
+   * @param {string} [opts.coalesceKey] See relayTo.
    * @returns {string[]} the peerIds a relay copy was sent toward.
    */
-  relayToUnreached (payload) {
+  relayToUnreached (payload, { coalesceKey } = {}) {
     if (!this.#pool) return []
     const relayed = []
     for (const peerId of this.#roster.keys()) {
       if (this.#peers.get(peerId)?.peer.connected) continue
-      this.#pool.send({ t: 'relay', roomId: this.#roomId, to: peerId, payload })
+      this.#pool.send(
+        { t: 'relay', roomId: this.#roomId, to: peerId, payload, ...(coalesceKey ? { ck: coalesceKey } : {}) },
+        { coalesceKey: coalesceKey ? `${coalesceKey}@${peerId}` : undefined },
+      )
       relayed.push(peerId)
     }
     return relayed

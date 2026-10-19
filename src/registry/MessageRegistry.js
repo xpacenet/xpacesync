@@ -43,9 +43,22 @@
  *                          envelopes), wrong for bulk payloads (the node's
  *                          bridge caps frames at 64KB, and every relayed
  *                          byte is server bandwidth).
+ *     coalesce:  boolean   Latest-only delivery class for the relay path:
+ *                          a newer message of this type from the same
+ *                          sender fully SUPERSEDES an older one that has
+ *                          not been sent yet, at every hop that can queue
+ *                          (the client's offline buffer, a backed-up
+ *                          socket, the node's outbound fanout). Right for
+ *                          state snapshots — a presence tick is worthless
+ *                          the moment a newer one exists, and on a weak
+ *                          uplink queueing stale ticks is what turns a
+ *                          hiccup into seconds of lag. Wrong for anything
+ *                          where every message matters (chat, signaling).
+ *                          Only meaningful together with relay: true.
+ *                          Default false.
  *   }
  */
-const DEFAULT_STRATEGY = Object.freeze({ persist: false, transport: 'mesh', queueOnFail: false, relay: false })
+const DEFAULT_STRATEGY = Object.freeze({ persist: false, transport: 'mesh', queueOnFail: false, relay: false, coalesce: false })
 
 export class MessageRegistry {
   #types = new Map()
