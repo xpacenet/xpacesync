@@ -1,4 +1,9 @@
 export { PeerMesh }          from './mesh/PeerMesh.js'
+// One connection per peer per device, shared by every surface that needs it.
+// Hand the same registry to two meshes and they stop opening two connections
+// to one person. See mesh/PeerLink.js for the ownership and lifetime rules.
+export { PeerLinkRegistry }  from './mesh/PeerLinkRegistry.js'
+export { PeerLink, PeerLease, LANE_TAG } from './mesh/PeerLink.js'
 export { RealtimeChannel }   from './channel/RealtimeChannel.js'
 export { DirectPeerChannel } from './channel/DirectPeerChannel.js'
 export { CallChannel }       from './channel/CallChannel.js'
