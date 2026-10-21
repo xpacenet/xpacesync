@@ -143,8 +143,32 @@ export class PeerMesh extends EventTarget {
     return [...this.#roster.keys()]
   }
 
-  /** Connect to one xpacenode and join `roomId`. Resolves once the socket is open. */
+  /**
+   * Connect to one xpacenode and join `roomId`. Resolves once the socket is
+   * open. Joining a mesh that is ALREADY joined to the same (nodeUrl, roomId)
+   * is a no-op.
+   *
+   * WHY THE GUARD. This used to overwrite #pool and #heartbeatTimer
+   * unconditionally. The previous interval then became unreachable, kept
+   * firing every 30 seconds, and threw `Cannot read properties of null
+   * (reading 'send')` from inside the timer as soon as leave() nulled the
+   * pool — while the old socket was silently dropped with #peers still
+   * populated by connections whose signalling path had gone.
+   *
+   * It matters now because sharing ONE connection between surfaces is the
+   * point (see DirectPeerChannel's `ownsMesh`): the moment a second surface
+   * is handed a live mesh, the natural thing for it to do is call join(),
+   * and before this that quietly destroyed the mesh it was handed. Measured
+   * in spacehub's tests/comms-connection-census.test.mjs (PART D.2).
+   *
+   * A join to a DIFFERENT room is still a real move, and still legal — it
+   * just clears the old heartbeat first instead of orphaning it.
+   */
   async join (nodeUrl, roomId) {
+    if (this.#pool && this.#roomId === roomId && this.#nodeUrl === nodeUrl) return
+    // Moving rooms: tear the previous membership down properly rather than
+    // leaving a live socket and a live timer with nothing referencing them.
+    if (this.#pool) this.leave()
     this.#roomId  = roomId
     this.#nodeUrl = nodeUrl
     this.#pool    = this.#poolFactory()
@@ -242,6 +266,7 @@ export class PeerMesh extends EventTarget {
 
   leave () {
     clearInterval(this.#heartbeatTimer)
+    this.#heartbeatTimer = null  // so a re-join cannot clear a handle that was already reused
     this.#pool?.send({ t: 'leave', roomId: this.#roomId })
     this.#pool?.close()
     for (const { peer } of this.#peers.values()) peer.close()

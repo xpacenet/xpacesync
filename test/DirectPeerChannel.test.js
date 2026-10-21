@@ -74,3 +74,64 @@ describe('DirectPeerChannel', () => {
     expect(mesh.left).toBe(true)
   })
 })
+
+describe('DirectPeerChannel on a BORROWED mesh (ownsMesh: false)', () => {
+  // The point of the flag: several surfaces reach one person over ONE
+  // connection, each filtering on its own message type, and none of them
+  // able to pull the connection out from under the others.
+  it('neither joins nor leaves a mesh it does not own', async () => {
+    const mesh = new FakeMesh()
+    mesh.peerIds = ['bob']
+    const borrower = new DirectPeerChannel(mesh, { peerId: 'bob', type: 'spaceinbox.envelope.v1', ownsMesh: false })
+    const states = []
+    borrower.addEventListener('state', ({ detail }) => states.push(detail.state))
+
+    await borrower.join('wss://node.example', 'the-lenders-room')
+    expect(mesh.joined).toBeUndefined()
+    expect(states).toEqual(['direct'])
+
+    borrower.close()
+    expect(mesh.left).toBe(false)
+    expect(borrower.ownsMesh).toBe(false)
+  })
+
+  it('still carries and filters its own typed traffic while borrowing', async () => {
+    const mesh = new FakeMesh()
+    mesh.peerIds = ['bob']
+    const borrower = new DirectPeerChannel(mesh, { peerId: 'bob', type: 'spaceinbox.envelope.v1', ownsMesh: false })
+    const received = []
+    borrower.addEventListener('message', ({ detail }) => received.push(detail.payload))
+    await borrower.join('wss://node.example', 'the-lenders-room')
+
+    expect(borrower.send({ cipher: 'hello' })).toBe(true)
+    mesh.emit('message', { from: 'bob', payload: { type: 'other.surface.v1', payload: 'not mine' } })
+    mesh.emit('message', { from: 'bob', payload: { type: 'spaceinbox.envelope.v1', payload: { cipher: 'mine' } } })
+    expect(received).toEqual([{ cipher: 'mine' }])
+  })
+
+  it('two borrowers share one mesh, and one closing leaves the other working', async () => {
+    const mesh = new FakeMesh()
+    mesh.peerIds = ['bob']
+    const a = new DirectPeerChannel(mesh, { peerId: 'bob', type: 'a.v1', ownsMesh: false })
+    const b = new DirectPeerChannel(mesh, { peerId: 'bob', type: 'b.v1', ownsMesh: false })
+    const seenByB = []
+    b.addEventListener('message', ({ detail }) => seenByB.push(detail.payload))
+    await a.join('wss://node.example', 'room')
+    await b.join('wss://node.example', 'room')
+
+    a.close()
+    expect(mesh.left).toBe(false)
+    mesh.emit('message', { from: 'bob', payload: { type: 'b.v1', payload: 'still here' } })
+    expect(seenByB).toEqual(['still here'])
+  })
+
+  it('a channel that OWNS its mesh still tears it down -- the default is unchanged', async () => {
+    const mesh = new FakeMesh()
+    const owner = new DirectPeerChannel(mesh, { peerId: 'bob', type: 'x.v1' })
+    await owner.join('wss://node.example', 'its-own-room')
+    expect(mesh.joined).toEqual({ nodeUrl: 'wss://node.example', routeId: 'its-own-room' })
+    owner.close()
+    expect(mesh.left).toBe(true)
+    expect(owner.ownsMesh).toBe(true)
+  })
+})
