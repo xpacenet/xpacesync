@@ -86,6 +86,16 @@ export class PeerMesh extends EventTarget {
   #trackCb         = null
   #links           = null        // PeerLinkRegistry — private unless one was injected
   #lane            = null        // this surface's logical stream on a shared connection
+  // peerId → tail of that peer's serialized task chain. See #withPeerLock:
+  // inbound signaling for ONE peer must be applied one at a time, in arrival
+  // order, and nothing in the XpaceNodePool dispatch path provides that.
+  //
+  // This is THIS SURFACE's ordering. It is not the whole of the guarantee:
+  // when two surfaces share one connection they have two sockets and two of
+  // these maps, so the lock that makes a SHARED connection safe has to live
+  // on the connection. It does — PeerLink#handleSignal owns a chain of its
+  // own, and that one is the structural guarantee. See the note there.
+  #peerLocks       = new Map()
   #iceServersFixed = false       // true once the caller explicitly passed iceServers — see join()
   #transportPolicy = 'auto'      // 'auto' (P2P + relay floor) | 'relay-only' (never dial WebRTC)
   #poolFactory     = () => new XpaceNodePool()
@@ -131,7 +141,6 @@ export class PeerMesh extends EventTarget {
     // rather than at the first acquire: the symptom of a mismatch is two
     // surfaces disagreeing about who yields on glare, which surfaces much
     // later as an intermittent connection that sometimes never opens.
-    this.#links.assertSelf(selfId)
     this.#links.assertSelf(selfId)
     if (iceServers) {
       this.#iceServers      = iceServers
@@ -264,7 +273,7 @@ export class PeerMesh extends EventTarget {
       }
     })
 
-    this.#pool.on('peer_join', async msg => {
+    this.#pool.on('peer_join', msg => {
       // `t` and `roomId` are the signaling envelope; anything else the
       // bridge relayed (e.g. the introPayload fields the peer announced
       // itself with) is forwarded as-is — PeerMesh doesn't know or care
@@ -275,8 +284,10 @@ export class PeerMesh extends EventTarget {
       this.dispatchEvent(new CustomEvent('peer:join', { detail: { peerId, announced } }))
       // A peer_join for someone we already track is normal on every
       // reconnect (both sides restate presence). Only rebuild the
-      // connection if it's actually dead.
-      await this.#ensureLivePeer(peerId)
+      // connection if it's actually dead. Serialized against this peer's
+      // inbound signals (see #withPeerLock) because a peer_join and the
+      // first offer routinely arrive together, and both build peers.
+      this.#withPeerLock(peerId, () => this.#ensureLivePeer(peerId))
     })
 
     this.#pool.on('peer_leave', msg => {
@@ -292,11 +303,17 @@ export class PeerMesh extends EventTarget {
       }
     })
 
-    this.#pool.on('signal', async msg => {
+    this.#pool.on('signal', msg => {
       const { from, payload } = msg
       if (!from || !payload) return
-      await this.#ensureLivePeer(from)
-      await this.#peers.get(from)?.handleSignal(payload)
+      // `#peers` now holds a PeerLease, not an `{ peer }` entry, so the
+      // application hop is `lease.handleSignal` → `link.handleSignal` →
+      // the one RTCPeer the link owns. The lock still wraps the pair:
+      // ensure-then-apply has to stay one indivisible step per peer.
+      this.#withPeerLock(from, async () => {
+        await this.#ensureLivePeer(from)
+        await this.#peers.get(from)?.handleSignal(payload)
+      })
     })
 
     // The relay floor's inbound half: a message another peer sent through
@@ -339,6 +356,7 @@ export class PeerMesh extends EventTarget {
     for (const lease of this.#peers.values()) lease.release()
     this.#peers.clear()
     this.#roster.clear()
+    this.#peerLocks.clear()
     this.#pool = null
   }
 
@@ -586,6 +604,76 @@ export class PeerMesh extends EventTarget {
     return lease
   }
 
+  /**
+   * Run `fn` after every task already queued for `peerId`, never alongside
+   * one. Returns the chained promise (callers fire-and-forget it).
+   *
+   * Why this exists — measured, not theorized. XpaceNodePool#dispatch is a
+   * synchronous `cbs.forEach(cb => cb(msg))`, so an `async` handler's promise
+   * is never awaited by the thing that called it. Every WebSocket frame
+   * arrives as its own task, so when two frames land closer together than
+   * one handler takes to finish, the handlers run CONCURRENTLY — and
+   * `RTCPeer#handleSignal` is a multi-await state machine reading
+   * `signalingState`, so a second description applied alongside the first
+   * reads a state the first has not finished moving yet.
+   *
+   * Concretely, with an answer and an offer arriving ~2ms apart — exactly
+   * what a call produces, because the caller answers the offer that carried
+   * the callee's microphone and then immediately offers its own — the
+   * offer's `collision` check still sees 'have-local-offer' left over from
+   * the answer that is mid-apply, so an impolite peer discards that offer as
+   * glare that never actually happened. Nothing retries it: the sender sits
+   * in 'have-local-offer' with no answer ever coming, its track is never
+   * negotiated, and `ontrack` never fires at the receiver — whose app then
+   * has nothing to attach to a media element, so that peer is never heard
+   * for the rest of the call, with the connection otherwise healthy and
+   * inbound byte counters still climbing (a sender transmits as soon as its
+   * OWN local description says sendrecv, so bytes arrive at a peer that is
+   * still sendonly and get counted with nothing audible — which is why
+   * rising inbound bytes are NOT proof of audibility).
+   *
+   * Measured on real engines (spacehub's tests/browser/call-cross-engine-
+   * media.mjs harness, Chromium and WebKit, strict FIFO relay, no artificial
+   * reordering, inter-signal spacing preserved): Blink<->Blink calls wedged
+   * exactly that way with concurrent application — one-way audio when the
+   * caller was the polite side, silence in BOTH directions when it was
+   * not — against zero once application was serialized per peer, which is
+   * all this helper does. test/PeerMesh.test.js has the unit-level control:
+   * without the lock the two descriptions interleave start:B, start:A,
+   * end:B, end:A.
+   *
+   * Peer CREATION is not part of the hazard, by the way: `#attachPeer` takes
+   * its lease from PeerLinkRegistry and registers it in `#peers` with no
+   * await anywhere in the path, so two signals for an unknown peer could
+   * never build two connections — and since the registry is a table keyed by
+   * peerId, a second connection has nowhere to live even in principle. The
+   * lock covers `#ensureLivePeer` anyway so that stays true if that order
+   * ever changes.
+   *
+   * Per-peer rather than one global chain: peers are independent
+   * connections, and one slow negotiation must not hold up another's.
+   *
+   * THIS LOCK IS PER SURFACE, and that is deliberately only half the
+   * guarantee. Two surfaces sharing one connection have two meshes, two
+   * sockets and two of these tables, so nothing here orders a world frame
+   * against a thread frame landing on the same RTCPeer. PeerLink#handleSignal
+   * carries a chain per CONNECTION for exactly that reason; read its note
+   * before concluding either lock is redundant.
+   */
+  #withPeerLock (peerId, fn) {
+    const tail = this.#peerLocks.get(peerId) ?? Promise.resolve()
+    const next = tail.then(fn).catch(err => {
+      console.warn('[xpacesync] peer task failed', peerId, err)
+    })
+    this.#peerLocks.set(peerId, next)
+    // Don't keep a settled chain around forever — but only drop the entry if
+    // nothing else queued behind this link in the meantime.
+    next.then(() => {
+      if (this.#peerLocks.get(peerId) === next) this.#peerLocks.delete(peerId)
+    })
+    return next
+  }
+
   #teardownPeer (peerId) {
     const lease = this.#peers.get(peerId)
     if (!lease) return
@@ -593,6 +681,7 @@ export class PeerMesh extends EventTarget {
     // synchronously, and this map must not be re-entered holding a lease
     // that is already going away.
     this.#peers.delete(peerId)
+    this.#peerLocks.delete(peerId)
     lease.release()
     this.dispatchEvent(new CustomEvent('peer:leave', { detail: { peerId } }))
   }

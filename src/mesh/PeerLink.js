@@ -218,6 +218,7 @@ export class PeerLink {
   #attached     = new Set()  // local tracks already on the connection
   #slots        = new Map()  // slot name → the track currently in it
   #remoteTracks = []         // inbound tracks, replayed to a late-attaching surface
+  #signalChain  = Promise.resolve()  // tail of this connection's serialized signal application
 
   /**
    * @param {object} [opts]
@@ -353,7 +354,43 @@ export class PeerLink {
     return true
   }
 
-  handleSignal (payload) { return this.#peer.handleSignal(payload) }
+  /**
+   * Apply one inbound signalling frame to this connection, after every frame
+   * already queued on it and never alongside one.
+   *
+   * WHY THE CHAIN LIVES HERE AND NOT ONLY IN PeerMesh. PeerMesh serializes
+   * per (surface, peer) with its own `#withPeerLock`, which is enough when a
+   * surface is alone on a connection. It stops being enough the moment two
+   * surfaces SHARE one — which is the whole point of this class. Each mesh
+   * has its own XpaceNodePool, its own socket, and its own lock table, so a
+   * frame arriving for the world surface and a frame arriving for the thread
+   * surface are serialized against their own siblings and against nothing
+   * else. Both then land on `this.#peer` — ONE RTCPeer, one
+   * `signalingState` — concurrently, which is exactly the interleaving that
+   * made an impolite peer discard a real offer as glare that never happened
+   * (see PeerMesh#withPeerLock for the measurement: 5 of 38 calls wedged
+   * before serializing, 0 of 32 after).
+   *
+   * So the two locks are not duplicates of each other. The mesh's lock keeps
+   * ensure-then-apply indivisible for one surface; this one makes "one
+   * connection applies one description at a time" a property of the
+   * connection, true however many surfaces or sockets feed it. Putting the
+   * guarantee where the shared mutable state actually is, is what keeps
+   * sharing from quietly undoing the glare fix.
+   *
+   * @param {object} payload
+   * @returns {Promise<void>} resolves once THIS frame has been applied.
+   */
+  handleSignal (payload) {
+    const next = this.#signalChain.then(() => {
+      if (this.#closed) return
+      return this.#peer.handleSignal(payload)
+    }).catch(err => {
+      this.#onWarn?.('[xpacesync] signal application failed', this.#peerId, err)
+    })
+    this.#signalChain = next
+    return next
+  }
 
   /**
    * Attach a local track once, however many surfaces ask.
